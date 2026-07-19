@@ -1,0 +1,41 @@
+[versions]
+# Toolchain mirrors PapaSheets, which is known to build on this machine.
+agp = "8.7.2"
+kotlin = "2.0.21"
+kotlinxSerialization = "1.7.3"
+composeBom = "2024.10.01"
+activityCompose = "1.9.3"
+coreKtx = "1.13.1"
+junit = "4.13.2"
+
+# Onyx Pen SDK — only :pen-onyx depends on this. Resolved from repo.boox.com (insecure http).
+onyxsdkPen = "1.4.11"
+
+[libraries]
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
+
+# Compose is staged for later steps (the spike screen itself uses plain Views, no Compose).
+# These are dependency declarations only; the Compose build feature is not enabled yet.
+compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
+compose-ui = { module = "androidx.compose.ui:ui" }
+compose-ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
+compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
+compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+compose-foundation = { module = "androidx.compose.foundation:foundation" }
+compose-material3 = { module = "androidx.compose.material3:material3" }
+activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
+
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+
+onyxsdk-pen = { module = "com.onyx.android.sdk:onyxsdk-pen", version.ref = "onyxsdkPen" }
+
+junit = { module = "junit:junit", version.ref = "junit" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+# Staged for later steps that introduce Compose UI.
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
