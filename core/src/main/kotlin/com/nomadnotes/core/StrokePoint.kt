@@ -1,5 +1,7 @@
 package com.nomadnotes.core
 
+import kotlinx.serialization.Serializable
+
 /**
  * A single sampled point of a pen stroke, in the shared vocabulary used across modules.
  *
@@ -14,6 +16,7 @@ package com.nomadnotes.core
  * @property timestampDelta milliseconds elapsed since the first point of the same stroke,
  *   so a stroke's timing is self-contained and independent of any absolute clock.
  */
+@Serializable
 data class StrokePoint(
     val x: Float,
     val y: Float,
