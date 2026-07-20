@@ -20,6 +20,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import com.nomadnotes.R
 import com.nomadnotes.core.StrokePoint
+import com.nomadnotes.pen.onyx.OnyxHiddenApi
 import com.nomadnotes.pen.onyx.OnyxRawDrawingController
 
 /**
@@ -68,6 +69,12 @@ class SpikeActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // On Boox, lift hidden-API enforcement off the Onyx system handwriting classes before any
+        // Onyx SDK class loads; without it the pen's raw-drawing region maps to empty and no ink is
+        // ever captured. No-op (and skipped) off Boox.
+        if (OnyxRawDrawingController.isBooxDevice()) {
+            OnyxHiddenApi.exemptOnyxSystemClasses()
+        }
         setContentView(buildContentView())
         surfaceView.holder.addCallback(surfaceCallback)
     }
@@ -127,13 +134,23 @@ class SpikeActivity : Activity() {
 
     private val surfaceCallback = object : SurfaceHolder.Callback {
         override fun surfaceCreated(holder: SurfaceHolder) {
-            if (!drawingInitialized) {
-                drawingInitialized = true
-                initDrawingBackend()
+            // The surface can be created before the view is measured; a zero-size limit rect makes
+            // TouchHelper filter out all pen input, so defer until the view has a real size.
+            if (surfaceView.width <= 0 || surfaceView.height <= 0) {
+                Log.i(TAG, "surfaceCreated with zero-size surface; deferring init")
+                surfaceView.post { surfaceCreated(holder) }
+                return
             }
+            // Clean the surface first, then bring raw drawing up last: an app-side surface blit
+            // while raw drawing is enabled clobbers TouchHelper, so raw drawing must start on an
+            // already-drawn surface (matches Onyx's ScribbleTouchHelperDemoActivity).
             synchronized(surfaceLock) {
                 ensureBitmap()
                 renderToScreen()
+            }
+            if (!drawingInitialized) {
+                drawingInitialized = true
+                initDrawingBackend()
             }
         }
 

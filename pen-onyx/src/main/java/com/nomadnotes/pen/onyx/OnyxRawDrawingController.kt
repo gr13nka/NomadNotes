@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
 import android.os.Build
+import android.util.Log
 import android.view.SurfaceView
 import com.nomadnotes.core.StrokePoint
 import com.onyx.android.sdk.api.device.epd.EpdController
@@ -36,21 +37,44 @@ class OnyxRawDrawingController(
     private val onStrokeFinished: (List<StrokePoint>) -> Unit,
 ) {
 
+    // Debug instrumentation: every callback logs so a pen test can show, from logcat alone,
+    // whether raw input reaches the app at all. Trim the per-point move log once diagnosed.
     private val callback = object : RawInputCallback() {
-        override fun onBeginRawDrawing(shortcut: Boolean, point: TouchPoint?) = Unit
-        override fun onEndRawDrawing(shortcut: Boolean, point: TouchPoint?) = Unit
-        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint?) = Unit
+        override fun onBeginRawDrawing(shortcut: Boolean, point: TouchPoint?) {
+            Log.i(TAG, "onBeginRawDrawing at (${point?.x}, ${point?.y})")
+        }
+
+        override fun onEndRawDrawing(shortcut: Boolean, point: TouchPoint?) {
+            Log.i(TAG, "onEndRawDrawing at (${point?.x}, ${point?.y})")
+        }
+
+        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint?) {
+            Log.i(TAG, "onRawDrawingTouchPointMoveReceived at (${point?.x}, ${point?.y})")
+        }
 
         override fun onRawDrawingTouchPointListReceived(pointList: TouchPointList?) {
-            val points = pointList?.points ?: return
+            val points = pointList?.points
+            Log.i(TAG, "onRawDrawingTouchPointListReceived: ${points?.size ?: 0} points")
+            if (points == null) return
             onStrokeFinished(points.toStrokePoints())
         }
 
         // Erasing is out of scope for the spike.
-        override fun onBeginRawErasing(shortcut: Boolean, point: TouchPoint?) = Unit
-        override fun onEndRawErasing(shortcut: Boolean, point: TouchPoint?) = Unit
-        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint?) = Unit
-        override fun onRawErasingTouchPointListReceived(pointList: TouchPointList?) = Unit
+        override fun onBeginRawErasing(shortcut: Boolean, point: TouchPoint?) {
+            Log.i(TAG, "onBeginRawErasing")
+        }
+
+        override fun onEndRawErasing(shortcut: Boolean, point: TouchPoint?) {
+            Log.i(TAG, "onEndRawErasing")
+        }
+
+        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint?) {
+            Log.i(TAG, "onRawErasingTouchPointMoveReceived")
+        }
+
+        override fun onRawErasingTouchPointListReceived(pointList: TouchPointList?) {
+            Log.i(TAG, "onRawErasingTouchPointListReceived")
+        }
     }
 
     private val touchHelper: TouchHelper = TouchHelper.create(surfaceView, callback)
@@ -61,6 +85,11 @@ class OnyxRawDrawingController(
      * after the surface is created and laid out; follow with [resume] to enable drawing.
      */
     fun openRawDrawing(limitRect: Rect, excludeRects: List<Rect>) {
+        Log.i(
+            TAG,
+            "openRawDrawing: surface=${surfaceView.width}x${surfaceView.height} " +
+                "limitRect=$limitRect excludeRects=$excludeRects",
+        )
         touchHelper
             .setStrokeWidth(STROKE_WIDTH)
             .setLimitRect(limitRect, ArrayList(excludeRects))
@@ -86,20 +115,27 @@ class OnyxRawDrawingController(
     /**
      * Blits [bitmap] onto the surface using the e-ink handwriting update mode. Used to show
      * persisted strokes (and to clear), since raw drawing's wet ink is not retained.
+     *
+     * Raw drawing is disabled for the duration of the blit and re-enabled afterwards: a
+     * lockCanvas/unlockCanvasAndPost while raw drawing is enabled clobbers TouchHelper's rendering,
+     * after which pen input stops producing any ink. Onyx's own ScribbleTouchHelperDemoActivity
+     * brackets every app-side surface draw the same way. Safe to call while raw drawing is active;
+     * raw drawing is left enabled on return.
      */
     fun renderToScreen(bitmap: Bitmap) {
-        EpdController.setViewDefaultUpdateMode(surfaceView, UpdateMode.HAND_WRITING_REPAINT_MODE)
-        val canvas = surfaceView.holder.lockCanvas()
-        if (canvas == null) {
-            EpdController.resetViewUpdateMode(surfaceView)
-            return
-        }
+        touchHelper.setRawDrawingEnabled(false)
         try {
-            canvas.drawColor(Color.WHITE)
-            canvas.drawBitmap(bitmap, 0f, 0f, null)
+            EpdController.setViewDefaultUpdateMode(surfaceView, UpdateMode.HAND_WRITING_REPAINT_MODE)
+            val canvas = surfaceView.holder.lockCanvas() ?: return
+            try {
+                canvas.drawColor(Color.WHITE)
+                canvas.drawBitmap(bitmap, 0f, 0f, null)
+            } finally {
+                surfaceView.holder.unlockCanvasAndPost(canvas)
+            }
         } finally {
-            surfaceView.holder.unlockCanvasAndPost(canvas)
             EpdController.resetViewUpdateMode(surfaceView)
+            touchHelper.setRawDrawingEnabled(true)
         }
     }
 
@@ -117,6 +153,7 @@ class OnyxRawDrawingController(
     }
 
     companion object {
+        private const val TAG = "OnyxRawDrawing"
         private const val STROKE_WIDTH = 3.0f
 
         /** Onyx Boox hardware reports "ONYX" as the manufacturer; only there is raw drawing real. */
