@@ -8,8 +8,8 @@ import kotlinx.serialization.json.Json
  * The one place the note model is turned into stored JSON and back.
  *
  * Every persisted file goes through this object so the on-disk format has a single definition.
- * The configured [Json] is exposed as [format] for callers that need a serializer directly
- * (e.g. streaming a file), but prefer the typed helpers.
+ * The configured [Json] is kept module-internal as [format]; callers reach the format only
+ * through the typed helpers, so there is no way to encode the model with a different config.
  *
  * Two settings shape the forward/backward-compatibility contract, and both matter:
  *  - `ignoreUnknownKeys = true` — a file written by a *newer* app version can carry top-level
@@ -26,7 +26,7 @@ import kotlinx.serialization.json.Json
  * or an older build will silently discard it.
  */
 object NotesJson {
-    val format: Json = Json {
+    internal val format: Json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
     }

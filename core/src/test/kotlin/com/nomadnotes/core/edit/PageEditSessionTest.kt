@@ -76,6 +76,24 @@ class PageEditSessionTest {
     }
 
     @Test
+    fun `undo of a non-adjacent multi-erase restores every stroke in its original position`() {
+        session.addStroke(mainLayer, stroke("s1"))
+        session.addStroke(mainLayer, stroke("s2"))
+        session.addStroke(mainLayer, stroke("s3"))
+        session.addStroke(mainLayer, stroke("s4"))
+
+        // Erase the strokes at indices 0 and 2, leaving a gap that undo must refill exactly.
+        session.eraseStrokes(mainLayer, listOf(StrokeId("s1"), StrokeId("s3")))
+        assertEquals(listOf(StrokeId("s2"), StrokeId("s4")), mainStrokeIds())
+
+        assertTrue(session.undo())
+        assertEquals(
+            listOf(StrokeId("s1"), StrokeId("s2"), StrokeId("s3"), StrokeId("s4")),
+            mainStrokeIds(),
+        )
+    }
+
+    @Test
     fun `eraseStrokes with only absent ids is a no-op that leaves history untouched`() {
         session.addStroke(mainLayer, stroke("a"))
         session.undo()
@@ -113,6 +131,22 @@ class PageEditSessionTest {
 
         assertEquals(before, session.page)
         assertFalse(session.redo())
+    }
+
+    @Test
+    fun `translateStrokes moves only the named strokes and leaves the rest in place`() {
+        session.addStroke(mainLayer, stroke("moved", x = 0f, y = 0f))
+        session.addStroke(mainLayer, stroke("still", x = 100f, y = 100f))
+
+        session.translateStrokes(mainLayer, listOf(StrokeId("moved")), dx = 5f, dy = 7f)
+
+        val strokes = session.page.layers.first { it.id == mainLayer }.strokes
+        val moved = strokes.first { it.id == StrokeId("moved") }.points.first()
+        val still = strokes.first { it.id == StrokeId("still") }.points.first()
+        assertEquals(5f, moved.x, 0f)
+        assertEquals(7f, moved.y, 0f)
+        assertEquals(100f, still.x, 0f)
+        assertEquals(100f, still.y, 0f)
     }
 
     // --- layers ----------------------------------------------------------------------------
