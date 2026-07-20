@@ -8,8 +8,8 @@ activityCompose = "1.9.3"
 coreKtx = "1.13.1"
 junit = "4.13.2"
 
-# Onyx Pen SDK — only :pen-onyx depends on this. Resolved from repo.boox.com (insecure http).
-onyxsdkPen = "1.4.11"
+# Onyx Pen SDK — only :pen-onyx depends on this. Resolved from repo.boox.com.
+onyxsdkPen = "1.5.4.1"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }

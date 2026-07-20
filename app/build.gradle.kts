@@ -19,6 +19,17 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    packaging {
+        jniLibs {
+            // onyxsdk-pen, onyxsdk-pennative and com.tencent:mmkv each bundle their own copy of
+            // the libc++ STL runtime (libc++_shared.so) for every ABI, which the packager refuses
+            // to merge. Keep the first: all copies are the ABI-stable C++ shared runtime and a
+            // single one serves every native lib. This is the only .so that collides across the
+            // vendored AARs (the SDK/MMKV libraries themselves have unique names).
+            pickFirsts += "**/libc++_shared.so"
+        }
+    }
 }
 
 kotlin {
