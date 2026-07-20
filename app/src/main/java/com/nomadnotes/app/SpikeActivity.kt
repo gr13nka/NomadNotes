@@ -219,7 +219,15 @@ class SpikeActivity : Activity() {
         timestampDelta = event.eventTime - fallbackStrokeStart,
     )
 
-    /** Draws a finished stroke (or a fallback segment) into the bitmap and redraws the surface. */
+    /**
+     * Records a finished stroke (or a fallback segment) into [strokeBitmap], the persistent source
+     * of truth for later redraws (surface recreation, Clear).
+     *
+     * On the Onyx path the e-ink panel already shows the wet ink the pen painted, so the surface is
+     * deliberately not blitted here: that per-stroke full-surface repaint (with raw drawing briefly
+     * disabled) is what delayed the start of the next stroke. The touch fallback has no wet ink, so
+     * it must blit every segment to show anything.
+     */
     private fun commitStroke(points: List<StrokePoint>) {
         synchronized(surfaceLock) {
             val canvas = strokeCanvas ?: return
@@ -235,7 +243,9 @@ class SpikeActivity : Activity() {
                     canvas.drawPath(path, paint)
                 }
             }
-            renderToScreen()
+            if (onyxController == null) {
+                renderToScreen()
+            }
         }
     }
 

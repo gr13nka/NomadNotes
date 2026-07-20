@@ -37,8 +37,8 @@ class OnyxRawDrawingController(
     private val onStrokeFinished: (List<StrokePoint>) -> Unit,
 ) {
 
-    // Debug instrumentation: every callback logs so a pen test can show, from logcat alone,
-    // whether raw input reaches the app at all. Trim the per-point move log once diagnosed.
+    // Debug instrumentation: the lifecycle callbacks (begin/end/stroke-list) log so a pen test can
+    // confirm from logcat alone that raw input reaches the app.
     private val callback = object : RawInputCallback() {
         override fun onBeginRawDrawing(shortcut: Boolean, point: TouchPoint?) {
             Log.i(TAG, "onBeginRawDrawing at (${point?.x}, ${point?.y})")
@@ -48,9 +48,8 @@ class OnyxRawDrawingController(
             Log.i(TAG, "onEndRawDrawing at (${point?.x}, ${point?.y})")
         }
 
-        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint?) {
-            Log.i(TAG, "onRawDrawingTouchPointMoveReceived at (${point?.x}, ${point?.y})")
-        }
+        // Silent by design: this fires on every pen sample, so logging here floods the input thread.
+        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint?) = Unit
 
         override fun onRawDrawingTouchPointListReceived(pointList: TouchPointList?) {
             val points = pointList?.points
