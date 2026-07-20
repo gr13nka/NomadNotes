@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">NomadNotes</string>
+    <string name="action_pen">Pen</string>
+    <string name="action_marker">Marker</string>
+    <string name="action_eraser">Eraser</string>
+    <string name="action_undo">Undo</string>
+    <string name="action_redo">Redo</string>
     <string name="action_clear">Clear</string>
 </resources>

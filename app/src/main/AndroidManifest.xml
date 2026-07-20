@@ -8,12 +8,17 @@
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
-            android:name=".app.SpikeActivity"
+            android:name=".app.EditorActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Kept as the raw-drawing reference; no longer the launcher. -->
+        <activity
+            android:name=".app.SpikeActivity"
+            android:exported="false" />
     </application>
 </manifest>
