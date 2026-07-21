@@ -1,8 +1,10 @@
 package com.nomadnotes.app.input
 
+import android.graphics.Bitmap
 import android.graphics.Rect
 import android.view.SurfaceView
 import com.nomadnotes.core.StrokePoint
+import com.nomadnotes.core.Tool
 
 /**
  * The seam between the editor and whatever hardware captures pen input.
@@ -13,9 +15,10 @@ import com.nomadnotes.core.StrokePoint
  * produced a stroke. What the panel does *during* a gesture — whether the hardware paints wet ink
  * itself or the backend must draw a preview — is likewise the backend's business, hidden here.
  *
- * The interface is intentionally minimal for now: the tool, nib width, and ink darkness live in the
- * editor, not the backend, so they are absent. The Onyx backend will need some of them in a later
- * step; the interface grows then rather than in advance.
+ * The backend also owns writing to the surface: the editor hands it the appearance in-progress ink
+ * should take ([setStrokeAppearance]) and the committed page to display ([present]), and the backend
+ * applies whatever surface protocol its hardware needs. Whether the hardware paints its own wet ink
+ * ([rendersWetInkNatively]) governs whether the editor even asks for a present after a stroke.
  */
 interface PenBackend {
 
@@ -30,6 +33,33 @@ interface PenBackend {
      * surface's own coordinates. Replaces any previously set rectangles.
      */
     fun setExcludeRects(rects: List<Rect>)
+
+    /** When set, a finished gesture is reported as an erase gesture rather than a drawn stroke. */
+    var eraseMode: Boolean
+
+    /**
+     * Sets how in-progress ink should look, so the backend's preview (a drawn one, or the panel's
+     * own hardware wet ink) matches the committed stroke the editor will render. [widthBase] is the
+     * nib width in surface pixels before pressure; [grayLevel] is ink darkness (0 = white, 255 =
+     * black). Applies to subsequent strokes.
+     */
+    fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int)
+
+    /**
+     * True when the hardware paints the wet stroke itself while the pen is down (the Onyx e-ink
+     * panel), so a just-finished stroke is already on screen and the editor must not [present] it —
+     * only persist it. False when the backend has no hardware ink and every visible change needs a
+     * [present].
+     */
+    val rendersWetInkNatively: Boolean
+
+    /**
+     * Blits the committed page [composite] to the surface for a structural repaint (clear, undo,
+     * erase, layer/template/page change, first paint). A raw-drawing backend brackets this so it
+     * cannot corrupt in-progress hardware ink; a plain backend blits directly. A lone finished
+     * stroke is not shown this way on a [rendersWetInkNatively] backend.
+     */
+    fun present(composite: Bitmap)
 
     /** Stops capturing and releases the surface. */
     fun detach()

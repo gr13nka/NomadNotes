@@ -7,6 +7,7 @@ import android.os.Build
 import android.util.Log
 import android.view.SurfaceView
 import com.nomadnotes.core.StrokePoint
+import com.nomadnotes.core.Tool
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.data.note.TouchPoint
@@ -21,24 +22,56 @@ import com.onyx.android.sdk.pen.data.TouchPointList
  * Raw drawing is what makes ink lag-free: while the pen is down the e-ink hardware paints the
  * "wet" stroke itself, bypassing the view hierarchy. That wet ink is ephemeral — it is not part
  * of any bitmap and disappears on the next surface refresh — so the caller must persist finished
- * strokes on its own. This controller reports each finished stroke through [onStrokeFinished] as
- * neutral [StrokePoint]s (never Onyx types), and [renderToScreen] blits the caller's persisted
- * bitmap back with an e-ink-appropriate update mode.
+ * strokes on its own. This controller reports each finished stroke through [onStrokeFinished] and
+ * each erase gesture through [onEraseGesture] as neutral [StrokePoint]s (never Onyx types), and
+ * [renderToScreen] blits the caller's persisted bitmap back with an e-ink-appropriate update mode.
+ *
+ * The controller also translates the editor's neutral drawing vocabulary onto the SDK, so the SDK's
+ * own constants stay hidden here: [setStrokeAppearance] maps a [Tool], nib width, and ink darkness
+ * to a stroke style/width/colour; [setEraseMode] switches the pen between inking and erasing; and
+ * device pressure is normalized to the 0..1 [StrokePoint] contract before a stroke leaves this class.
+ *
+ * Two erase paths both surface through [onEraseGesture]: the stylus side button (the SDK's own
+ * erasing callbacks) and the UI eraser tool ([setEraseMode] turns wet-ink rendering off but the pen
+ * keeps reporting through the drawing channel, so those "drawn" gestures are routed as erases).
  *
  * The caller owns the lifecycle and must forward it: [openRawDrawing] once the surface and its
  * layout rectangles are known, [resume]/[pause] from the Activity's onResume/onPause, and [close]
  * from onDestroy.
  *
- * Threading: Onyx delivers raw-input callbacks on its own input thread, so [onStrokeFinished] may
- * run off the main thread.
+ * Threading: Onyx delivers raw-input callbacks on its own input thread, so [onStrokeFinished] and
+ * [onEraseGesture] may run off the main thread; the caller marshals them as its contract requires.
  */
 class OnyxRawDrawingController(
     private val surfaceView: SurfaceView,
     private val onStrokeFinished: (List<StrokePoint>) -> Unit,
+    private val onEraseGesture: (List<StrokePoint>) -> Unit = {},
 ) {
 
-    // Debug instrumentation: the lifecycle callbacks (begin/end/stroke-list) log so a pen test can
-    // confirm from logcat alone that raw input reaches the app.
+    // Configuration the caller has chosen, re-applied verbatim whenever raw drawing is (re)opened:
+    // TouchHelper fixes the capture region and defaults at openRawDrawing time, so a later change to
+    // the region means a close/reopen (see [setExcludeRects]).
+    private var limitRect = Rect()
+    private var excludeRects: List<Rect> = emptyList()
+    private var strokeStyle: Int = TouchHelper.STROKE_STYLE_PENCIL
+    private var strokeWidthPx: Float = DEFAULT_STROKE_WIDTH
+    private var strokeColor: Int = Color.BLACK
+
+    // State mirrors: TouchHelper exposes no getters we trust, so we track open/enabled/erasing here
+    // to bracket [renderToScreen] correctly and to restore the enabled state across a region reopen.
+    private var rawDrawingOpen = false
+    private var drawingEnabled = false
+    private var erasing = false
+
+    // Device pressure range, read once. TouchPoint.pressure is a raw device value; the StrokePoint
+    // contract requires 0..1, so points are divided by this. Guarded against a nonpositive reading.
+    private val maxPressure: Float by lazy {
+        val reported = runCatching { EpdController.getMaxTouchPressure() }.getOrDefault(0f)
+        if (reported > 0f) reported else DEFAULT_MAX_PRESSURE
+    }
+
+    // Debug instrumentation: the begin/end/list callbacks log so a pen test can confirm from logcat
+    // alone that raw input reaches the app.
     private val callback = object : RawInputCallback() {
         override fun onBeginRawDrawing(shortcut: Boolean, point: TouchPoint?) {
             Log.i(TAG, "onBeginRawDrawing at (${point?.x}, ${point?.y})")
@@ -52,13 +85,14 @@ class OnyxRawDrawingController(
         override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint?) = Unit
 
         override fun onRawDrawingTouchPointListReceived(pointList: TouchPointList?) {
-            val points = pointList?.points
-            Log.i(TAG, "onRawDrawingTouchPointListReceived: ${points?.size ?: 0} points")
-            if (points == null) return
-            onStrokeFinished(points.toStrokePoints())
+            val points = pointList?.points ?: return
+            Log.i(TAG, "onRawDrawingTouchPointListReceived: ${points.size} points (erasing=$erasing)")
+            // With the UI eraser active, wet-ink rendering is off but the pen still reports through
+            // the drawing channel, so a "drawn" gesture here is really an erase; route it as one.
+            val neutral = points.toStrokePoints()
+            if (erasing) onEraseGesture(neutral) else onStrokeFinished(neutral)
         }
 
-        // Erasing is out of scope for the spike.
         override fun onBeginRawErasing(shortcut: Boolean, point: TouchPoint?) {
             Log.i(TAG, "onBeginRawErasing")
         }
@@ -67,62 +101,127 @@ class OnyxRawDrawingController(
             Log.i(TAG, "onEndRawErasing")
         }
 
-        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint?) {
-            Log.i(TAG, "onRawErasingTouchPointMoveReceived")
-        }
+        override fun onRawErasingTouchPointMoveReceived(point: TouchPoint?) = Unit
 
         override fun onRawErasingTouchPointListReceived(pointList: TouchPointList?) {
-            Log.i(TAG, "onRawErasingTouchPointListReceived")
+            // Stylus side-button erasing: always an erase gesture, independent of the UI tool.
+            val points = pointList?.points ?: return
+            Log.i(TAG, "onRawErasingTouchPointListReceived: ${points.size} points")
+            onEraseGesture(points.toStrokePoints())
         }
     }
 
     private val touchHelper: TouchHelper = TouchHelper.create(surfaceView, callback)
 
     /**
-     * Starts capturing pen input inside [limitRect] but not inside [excludeRects] (e.g. the top
-     * bar, so its buttons stay tappable). Coordinates are relative to [surfaceView]. Call once,
-     * after the surface is created and laid out; follow with [resume] to enable drawing.
+     * Starts capturing pen input inside [limitRect] but not inside [excludeRects] (e.g. a top bar,
+     * so its buttons stay tappable). Coordinates are relative to [surfaceView]. Call once, after the
+     * surface is created and laid out; follow with [resume] to enable drawing. Any stroke appearance
+     * or erase mode set beforehand is applied here.
      */
     fun openRawDrawing(limitRect: Rect, excludeRects: List<Rect>) {
+        this.limitRect = Rect(limitRect)
+        this.excludeRects = excludeRects.map { Rect(it) }
         Log.i(
             TAG,
             "openRawDrawing: surface=${surfaceView.width}x${surfaceView.height} " +
                 "limitRect=$limitRect excludeRects=$excludeRects",
         )
+        applyRegionAndOpen()
+    }
+
+    // Opens raw drawing with the currently stored region and appearance. openRawDrawing must be
+    // preceded by setStrokeWidth/setLimitRect and followed by the style/colour/render/erase setters,
+    // matching Onyx's ScribbleTouchHelperDemoActivity; this keeps that exact order in one place so a
+    // region reopen restores an identical configuration.
+    private fun applyRegionAndOpen() {
         touchHelper
-            .setStrokeWidth(STROKE_WIDTH)
+            .setStrokeWidth(strokeWidthPx)
             .setLimitRect(limitRect, ArrayList(excludeRects))
             .openRawDrawing()
-        // PENCIL keeps a near-uniform width, matching the fixed-width polyline the caller persists,
-        // so the wet ink and the redrawn ink look the same.
-        touchHelper.setStrokeStyle(TouchHelper.STROKE_STYLE_PENCIL)
-        touchHelper.setRawDrawingRenderEnabled(true)
+        touchHelper.setStrokeStyle(strokeStyle)
+        touchHelper.setStrokeColor(strokeColor)
+        touchHelper.setRawDrawingRenderEnabled(!erasing)
+        // Route the stylus side button to erasing, so hardware-side erase reaches onEraseGesture.
+        touchHelper.enableSideBtnErase(true)
+        rawDrawingOpen = true
     }
 
     fun resume() {
         touchHelper.setRawDrawingEnabled(true)
+        drawingEnabled = true
     }
 
     fun pause() {
         touchHelper.setRawDrawingEnabled(false)
+        drawingEnabled = false
     }
 
     fun close() {
         touchHelper.closeRawDrawing()
+        rawDrawingOpen = false
+        drawingEnabled = false
+    }
+
+    /**
+     * Sets how the wet stroke looks so it matches the ink the caller will later render: [tool] picks
+     * the stroke style (and a wider nib for the marker), [widthBase] is the nib width in surface
+     * pixels, and [grayLevel] (0 = white, 255 = black) picks a gray so the wet tone ≈ the committed
+     * tone. Takes effect on the next stroke; may be called before or after [openRawDrawing].
+     */
+    fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int) {
+        strokeStyle = tool.toStrokeStyle()
+        strokeWidthPx = tool.strokeWidth(widthBase)
+        strokeColor = grayLevelToColor(grayLevel)
+        if (rawDrawingOpen) {
+            touchHelper.setStrokeStyle(strokeStyle)
+            touchHelper.setStrokeWidth(strokeWidthPx)
+            touchHelper.setStrokeColor(strokeColor)
+        }
+    }
+
+    /**
+     * Switches the pen between inking and erasing. While [erasing] the panel paints no wet ink, but
+     * the pen keeps reporting gestures (routed to [onEraseGesture]); restoring it re-enables wet ink.
+     */
+    fun setEraseMode(erasing: Boolean) {
+        if (this.erasing == erasing) return
+        this.erasing = erasing
+        if (rawDrawingOpen) touchHelper.setRawDrawingRenderEnabled(!erasing)
+    }
+
+    /**
+     * Replaces the excluded regions (e.g. when a measured toolbar moves). TouchHelper fixes its
+     * capture region at [openRawDrawing], so once open the change is applied by closing and
+     * reopening raw drawing, preserving the enabled state across the swap. A no-op if unchanged.
+     */
+    fun setExcludeRects(rects: List<Rect>) {
+        val updated = rects.map { Rect(it) }
+        if (updated == excludeRects) return
+        excludeRects = updated
+        if (!rawDrawingOpen) return
+        val wasEnabled = drawingEnabled
+        if (drawingEnabled) pause()
+        touchHelper.closeRawDrawing()
+        rawDrawingOpen = false
+        applyRegionAndOpen()
+        if (wasEnabled) resume()
     }
 
     /**
      * Blits [bitmap] onto the surface using the e-ink handwriting update mode. Used to show
      * persisted strokes (and to clear), since raw drawing's wet ink is not retained.
      *
-     * Raw drawing is disabled for the duration of the blit and re-enabled afterwards: a
-     * lockCanvas/unlockCanvasAndPost while raw drawing is enabled clobbers TouchHelper's rendering,
-     * after which pen input stops producing any ink. Onyx's own ScribbleTouchHelperDemoActivity
-     * brackets every app-side surface draw the same way. Safe to call while raw drawing is active;
-     * raw drawing is left enabled on return.
+     * A lockCanvas/unlockCanvasAndPost corrupts TouchHelper's rendering only while raw drawing is
+     * actively rendering, so the blit is bracketed by disable/enable exactly then; when raw drawing
+     * is paused or not yet open, the surface is ours and the blit runs directly. Onyx's own
+     * ScribbleTouchHelperDemoActivity brackets every app-side surface draw the same way. The prior
+     * enabled state is preserved, so presenting while paused (e.g. a panel is open) does not
+     * re-enable drawing.
      */
     fun renderToScreen(bitmap: Bitmap) {
-        touchHelper.setRawDrawingEnabled(false)
+        val bracket = rawDrawingOpen && drawingEnabled
+        if (bracket) touchHelper.setRawDrawingEnabled(false)
         try {
             EpdController.setViewDefaultUpdateMode(surfaceView, UpdateMode.HAND_WRITING_REPAINT_MODE)
             val canvas = surfaceView.holder.lockCanvas() ?: return
@@ -134,7 +233,7 @@ class OnyxRawDrawingController(
             }
         } finally {
             EpdController.resetViewUpdateMode(surfaceView)
-            touchHelper.setRawDrawingEnabled(true)
+            if (bracket) touchHelper.setRawDrawingEnabled(true)
         }
     }
 
@@ -145,15 +244,39 @@ class OnyxRawDrawingController(
             StrokePoint(
                 x = p.x,
                 y = p.y,
-                pressure = p.pressure,
+                pressure = (p.pressure / maxPressure).coerceIn(0f, 1f),
                 timestampDelta = p.timestamp - startTimestamp,
             )
         }
     }
 
+    private fun Tool.toStrokeStyle(): Int = when (this) {
+        // Fountain varies width with pressure/speed, like the editor's pressure-modulated pen.
+        Tool.PEN -> TouchHelper.STROKE_STYLE_FOUNTAIN
+        Tool.PENCIL -> TouchHelper.STROKE_STYLE_PENCIL
+        Tool.MARKER -> TouchHelper.STROKE_STYLE_MARKER
+    }
+
+    private fun Tool.strokeWidth(widthBase: Float): Float = when (this) {
+        Tool.PEN, Tool.PENCIL -> widthBase
+        // Mirrors StrokeRenderer's broad marker nib so the wet stroke ≈ the committed one.
+        Tool.MARKER -> widthBase * MARKER_WIDTH_MULTIPLIER
+    }
+
+    // Mirrors StrokeRenderer.grayLevelToColor: darkness 0..255 maps to a gray whose channel value is
+    // its complement (255 = black). Duplicated because :pen-onyx cannot depend on :app's renderer.
+    private fun grayLevelToColor(grayLevel: Int): Int {
+        val channel = 255 - grayLevel.coerceIn(0, 255)
+        return Color.rgb(channel, channel, channel)
+    }
+
     companion object {
         private const val TAG = "OnyxRawDrawing"
-        private const val STROKE_WIDTH = 3.0f
+        private const val DEFAULT_STROKE_WIDTH = 3.0f
+        private const val MARKER_WIDTH_MULTIPLIER = 2.5f
+
+        /** Fallback pressure range when the device reports a nonpositive maximum (see [maxPressure]). */
+        private const val DEFAULT_MAX_PRESSURE = 4096f
 
         /** Onyx Boox hardware reports "ONYX" as the manufacturer; only there is raw drawing real. */
         fun isBooxDevice(): Boolean = Build.MANUFACTURER.equals("ONYX", ignoreCase = true)

@@ -1,5 +1,6 @@
 package com.nomadnotes.app
 
+import android.graphics.Rect
 import android.os.Bundle
 import android.util.Log
 import android.view.SurfaceHolder
@@ -31,6 +32,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -38,6 +41,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.nomadnotes.R
 import com.nomadnotes.app.input.AndroidPenBackend
+import com.nomadnotes.app.input.OnyxPenBackend
 import com.nomadnotes.app.input.PenBackend
 import com.nomadnotes.app.render.PageRenderer
 import com.nomadnotes.app.render.TemplateRef
@@ -106,7 +110,14 @@ class EditorActivity : ComponentActivity() {
     private lateinit var templateResolver: TemplateResolver
 
     private val renderer = PageRenderer()
-    private val backend = AndroidPenBackend { renderer.composite() }
+
+    // Chosen in onCreate: the Onyx raw-drawing backend on Boox hardware, the plain touch backend
+    // everywhere else. The editor talks only to the interface and never learns which it holds.
+    private lateinit var backend: PenBackend
+
+    // Last toolbar exclude rect pushed to the backend, in surface-local pixels; deduped so a stable
+    // re-layout does not churn the backend's capture region.
+    private var toolbarExcludeRect: Rect? = null
 
     // Loaded off the main thread once, then read only on the main thread. `notebook` is null when
     // storage is unavailable — the editor still runs on an in-memory page, it just cannot persist.
@@ -147,12 +158,38 @@ class EditorActivity : ComponentActivity() {
         storage = NotebookStorage(root)
         templateResolver = TemplateResolver(storage.templatesDir)
         surfaceView = SurfaceView(this)
+        backend = createBackend()
         surfaceView.holder.addCallback(surfaceCallback)
         setContent { EinkTheme { EditorScreen() } }
         openNotebookFromIntent()
     }
 
+    /**
+     * Picks the pen backend for this device. On Boox the hidden-API exemption must be installed
+     * before the Onyx SDK is ever touched, so it runs here — [OnyxPenBackend.isSupported] only reads
+     * the manufacturer and loads no Onyx SDK class.
+     */
+    private fun createBackend(): PenBackend {
+        val composite = { renderer.composite() }
+        return if (OnyxPenBackend.isSupported()) {
+            OnyxPenBackend.prepareProcess()
+            Log.i(TAG, "Pen backend: Onyx raw drawing")
+            OnyxPenBackend(composite)
+        } else {
+            Log.i(TAG, "Pen backend: touch")
+            AndroidPenBackend(composite)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-enable pen capture on return, unless a panel is up (then it stays suppressed).
+        updateBackendEnabled()
+    }
+
     override fun onPause() {
+        // Stop raw drawing before we background so the pen does not draw while we are not foreground.
+        backend.setEnabled(false)
         super.onPause()
         // onPause can be the last callback before the process is killed, so persist synchronously:
         // cancel the pending debounce, then block on the final save so it lands before we return.
@@ -223,36 +260,44 @@ class EditorActivity : ComponentActivity() {
         override fun surfaceDestroyed(holder: SurfaceHolder) = Unit
     }
 
-    /** First render plus backend attach, once both the surface has a size and a page has loaded. */
+    /**
+     * First render plus backend attach, once the surface has a size and a page has loaded. The
+     * composite is built before attach so the backend can show it while bringing pen capture up; on
+     * the Onyx backend that order matters (the surface must be drawn before raw drawing turns on).
+     */
     private fun startEditingIfReady() {
         session ?: return
         if (!surfaceReady) return
-        renderPage()
+        composePage()
         if (!backendAttached) {
+            backend.setStrokeAppearance(uiTool, uiWidth.px, uiShade.level)
             backend.attach(surfaceView, penListener)
             backendAttached = true
+        } else {
+            presentComposite()
         }
     }
 
     // --- rendering -------------------------------------------------------------------------
 
-    /** Resolves the page's template and rebuilds the whole composite. Use for anything but a lone new stroke. */
+    /** Rebuilds the whole composite and shows it. Use for anything but a lone new stroke. */
     private fun renderPage() {
+        composePage()
+        presentComposite()
+    }
+
+    /** Rebuilds the composite from the current page and template, without touching the surface. */
+    private fun composePage() {
         val session = session ?: return
         if (surfaceWidth <= 0 || surfaceHeight <= 0) return
         val template = templateResolver.resolve(session.page.templateRef, surfaceWidth, surfaceHeight)
         renderer.renderFull(session.page, template)
-        presentComposite()
     }
 
+    /** Shows the current composite on the surface (the backend brackets the blit if its hardware needs it). */
     private fun presentComposite() {
-        val holder = surfaceView.holder
-        val canvas = holder.lockCanvas() ?: return
-        try {
-            canvas.drawBitmap(renderer.composite(), 0f, 0f, null)
-        } finally {
-            holder.unlockCanvasAndPost(canvas)
-        }
+        if (surfaceWidth <= 0 || surfaceHeight <= 0) return
+        backend.present(renderer.composite())
     }
 
     // --- pen input -------------------------------------------------------------------------
@@ -274,8 +319,11 @@ class EditorActivity : ComponentActivity() {
                 points = points,
             )
             session.addStroke(layerId, stroke)
+            // Always record the stroke into the layer bitmap. Present it only when the backend does
+            // not paint wet ink itself: on Onyx the panel already shows this stroke, and a per-stroke
+            // blit there (with raw drawing briefly disabled) is exactly what delays the next stroke.
             renderer.appendStroke(layerId, stroke)
-            presentComposite()
+            if (!backend.rendersWetInkNatively) presentComposite()
             refreshUndoRedo()
             scheduleAutosave()
         }
@@ -315,11 +363,27 @@ class EditorActivity : ComponentActivity() {
         uiTool = tool
         uiEraser = false
         backend.eraseMode = false
+        pushStrokeAppearance()
     }
 
     private fun selectEraser() {
         uiEraser = true
         backend.eraseMode = true
+    }
+
+    private fun setWidth(width: StrokeWidth) {
+        uiWidth = width
+        pushStrokeAppearance()
+    }
+
+    private fun setShade(shade: InkShade) {
+        uiShade = shade
+        pushStrokeAppearance()
+    }
+
+    /** Tells the backend how the next stroke should look, so its wet ink matches the committed stroke. */
+    private fun pushStrokeAppearance() {
+        backend.setStrokeAppearance(uiTool, uiWidth.px, uiShade.level)
     }
 
     private fun undo() {
@@ -415,6 +479,24 @@ class EditorActivity : ComponentActivity() {
     /** Pen capture is off while a panel is open, so a tap meant for the panel never draws a stroke. */
     private fun updateBackendEnabled() {
         backend.setEnabled(!uiLayersOpen && !uiTemplateOpen)
+    }
+
+    /**
+     * Pushes the toolbar's on-screen bounds to the backend as an exclude rect, in surface-local
+     * pixels, so a pen stroke starting on the toolbar is never captured as ink. Called on each
+     * toolbar layout; deduped so a stable layout does not reconfigure the backend's capture region.
+     */
+    private fun updateToolbarExclude(boundsInWindow: androidx.compose.ui.geometry.Rect) {
+        val surfaceLocation = IntArray(2).also { surfaceView.getLocationInWindow(it) }
+        val rect = Rect(
+            (boundsInWindow.left - surfaceLocation[0]).toInt(),
+            (boundsInWindow.top - surfaceLocation[1]).toInt(),
+            (boundsInWindow.right - surfaceLocation[0]).toInt(),
+            (boundsInWindow.bottom - surfaceLocation[1]).toInt(),
+        )
+        if (rect == toolbarExcludeRect) return
+        toolbarExcludeRect = rect
+        backend.setExcludeRects(listOf(rect))
     }
 
     // --- page navigation -------------------------------------------------------------------
@@ -555,7 +637,12 @@ class EditorActivity : ComponentActivity() {
 
     @Composable
     private fun EditorToolbar() {
-        Column(Modifier.fillMaxWidth().background(EinkWhite)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(EinkWhite)
+                .onGloballyPositioned { updateToolbarExclude(it.boundsInWindow()) },
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -570,14 +657,14 @@ class EditorActivity : ComponentActivity() {
                 EinkToggle(stringResource(R.string.action_eraser), selected = uiEraser) { selectEraser() }
                 ToolbarDivider()
 
-                EinkToggle(stringResource(R.string.width_small), selected = uiWidth == StrokeWidth.S) { uiWidth = StrokeWidth.S }
-                EinkToggle(stringResource(R.string.width_medium), selected = uiWidth == StrokeWidth.M) { uiWidth = StrokeWidth.M }
-                EinkToggle(stringResource(R.string.width_large), selected = uiWidth == StrokeWidth.L) { uiWidth = StrokeWidth.L }
+                EinkToggle(stringResource(R.string.width_small), selected = uiWidth == StrokeWidth.S) { setWidth(StrokeWidth.S) }
+                EinkToggle(stringResource(R.string.width_medium), selected = uiWidth == StrokeWidth.M) { setWidth(StrokeWidth.M) }
+                EinkToggle(stringResource(R.string.width_large), selected = uiWidth == StrokeWidth.L) { setWidth(StrokeWidth.L) }
                 ToolbarDivider()
 
-                EinkToggle(stringResource(R.string.shade_black), selected = uiShade == InkShade.BLACK) { uiShade = InkShade.BLACK }
-                EinkToggle(stringResource(R.string.shade_dark), selected = uiShade == InkShade.DARK) { uiShade = InkShade.DARK }
-                EinkToggle(stringResource(R.string.shade_light), selected = uiShade == InkShade.LIGHT) { uiShade = InkShade.LIGHT }
+                EinkToggle(stringResource(R.string.shade_black), selected = uiShade == InkShade.BLACK) { setShade(InkShade.BLACK) }
+                EinkToggle(stringResource(R.string.shade_dark), selected = uiShade == InkShade.DARK) { setShade(InkShade.DARK) }
+                EinkToggle(stringResource(R.string.shade_light), selected = uiShade == InkShade.LIGHT) { setShade(InkShade.LIGHT) }
                 ToolbarDivider()
 
                 EinkButton(stringResource(R.string.action_undo), enabled = uiCanUndo) { undo() }

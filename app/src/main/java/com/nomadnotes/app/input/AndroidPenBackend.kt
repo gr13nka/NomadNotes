@@ -10,6 +10,7 @@ import android.graphics.Rect
 import android.view.MotionEvent
 import android.view.SurfaceView
 import com.nomadnotes.core.StrokePoint
+import com.nomadnotes.core.Tool
 
 /**
  * A [PenBackend] built on ordinary [MotionEvent] touch input, for the emulator and non-Onyx
@@ -31,8 +32,10 @@ class AndroidPenBackend(
     private val currentComposite: () -> Bitmap,
 ) : PenBackend {
 
-    /** When set, a finished gesture is reported as an erase gesture rather than a drawn stroke. */
-    var eraseMode: Boolean = false
+    override var eraseMode: Boolean = false
+
+    // Plain touch has no hardware wet ink, so this backend must draw and present every change itself.
+    override val rendersWetInkNatively: Boolean = false
 
     private var surfaceView: SurfaceView? = null
     private var listener: PenBackend.Listener? = null
@@ -43,7 +46,8 @@ class AndroidPenBackend(
     private var gestureStart = 0L
     private var capturing = false
 
-    private val inkPreviewPaint = strokePaint(Color.BLACK, INK_PREVIEW_WIDTH)
+    // Rebuilt by [setStrokeAppearance] so the live preview approximates the committed stroke.
+    private var inkPreviewPaint = strokePaint(Color.BLACK, INK_PREVIEW_WIDTH)
     private val erasePreviewPaint = strokePaint(ERASE_PREVIEW_COLOR, ERASE_PREVIEW_WIDTH)
     private val previewPath = Path()
 
@@ -52,6 +56,8 @@ class AndroidPenBackend(
         this.surfaceView = surfaceView
         this.listener = listener
         surfaceView.setOnTouchListener { _, event -> onTouch(event) }
+        // Bring the surface up to the committed page as the first thing the user sees.
+        present(currentComposite())
     }
 
     override fun setEnabled(enabled: Boolean) {
@@ -61,6 +67,22 @@ class AndroidPenBackend(
 
     override fun setExcludeRects(rects: List<Rect>) {
         excludeRects = rects.toList()
+    }
+
+    override fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int) {
+        val channel = 255 - grayLevel.coerceIn(0, 255)
+        val color = Color.rgb(channel, channel, channel)
+        val width = if (tool == Tool.MARKER) widthBase * MARKER_PREVIEW_MULTIPLIER else widthBase
+        inkPreviewPaint = strokePaint(color, width).apply {
+            if (tool == Tool.MARKER) alpha = MARKER_PREVIEW_ALPHA
+        }
+    }
+
+    override fun present(composite: Bitmap) {
+        lockedSurface { canvas ->
+            canvas.drawColor(Color.WHITE)
+            canvas.drawBitmap(composite, 0f, 0f, null)
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -187,8 +209,12 @@ class AndroidPenBackend(
     }
 
     private companion object {
-        /** The live pen preview is a thin black line; the finished stroke replaces it with real ink. */
+        /** The preview width before [setStrokeAppearance] runs; the finished stroke replaces it with real ink. */
         const val INK_PREVIEW_WIDTH = 3f
+
+        /** The marker preview widens and dims to hint the broad, translucent nib (mirrors StrokeRenderer). */
+        const val MARKER_PREVIEW_MULTIPLIER = 2.5f
+        const val MARKER_PREVIEW_ALPHA = 128
 
         /** The eraser preview hints its path and rough reach without looking like drawn ink. */
         const val ERASE_PREVIEW_WIDTH = 12f
