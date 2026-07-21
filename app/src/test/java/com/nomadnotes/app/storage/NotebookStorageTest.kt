@@ -1,5 +1,6 @@
 package com.nomadnotes.app.storage
 
+import com.nomadnotes.core.NotesJson
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -86,6 +87,24 @@ class NotebookStorageTest {
     @Test
     fun `loadNotebook on a missing notebook throws StorageException`() {
         assertThrows(StorageException::class.java) { storage.loadNotebook("Ghost") }
+    }
+
+    @Test
+    fun `loadNotebook adopts the directory name when the stored name has drifted`() {
+        val created = storage.createNotebook("Correct")
+        // Simulate a crash between renameNotebook's directory move and its JSON rewrite: the
+        // directory is "Correct" but notebook.json still carries the pre-rename name.
+        File(root, "Correct.nnote/notebook.json")
+            .writeText(NotesJson.encodeNotebook(created.copy(name = "Stale")))
+
+        val loaded = storage.loadNotebook("Correct")
+        assertEquals("directory name wins over the stored name", "Correct", loaded.name)
+        assertEquals("identity is preserved", created.id, loaded.id)
+
+        // A later save must write back to the real directory, never resurrect a "Stale.nnote".
+        storage.savePage(loaded, storage.loadPage(loaded, loaded.pageIds.first()))
+        assertFalse("stale directory must not be created", File(root, "Stale.nnote").exists())
+        assertTrue(File(root, "Correct.nnote/notebook.json").isFile)
     }
 
     @Test

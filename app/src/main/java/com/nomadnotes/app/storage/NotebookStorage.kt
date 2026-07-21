@@ -95,10 +95,17 @@ class NotebookStorage(private val rootDir: File) {
     }
 
     /** Loads a notebook's metadata. Throws [StorageException] if it is missing or corrupt. */
-    fun loadNotebook(name: String): Notebook =
-        readAndDecode(File(notebookDir(validateName(name)), NOTEBOOK_FILE), "notebook") {
+    fun loadNotebook(name: String): Notebook {
+        val dirName = validateName(name)
+        val notebook = readAndDecode(File(notebookDir(dirName), NOTEBOOK_FILE), "notebook") {
             NotesJson.decodeNotebook(it)
         }
+        // The directory name is authoritative. If the stored name has drifted from it (e.g. a crash
+        // between renameNotebook's directory move and its JSON rewrite), adopt the directory's name
+        // so later saves write back to this directory instead of resurrecting the old one via
+        // savePage/saveNotebook's mkdirs.
+        return if (notebook.name == dirName) notebook else notebook.copy(name = dirName)
+    }
 
     /** Loads one page of [notebook]. Throws [StorageException] if it is missing or corrupt. */
     fun loadPage(notebook: Notebook, pageId: PageId): Page =
@@ -172,9 +179,15 @@ class NotebookStorage(private val rootDir: File) {
 
     /**
      * Writes [text] to [target] atomically: fully write a sibling temp file, then rename it over
-     * the target. The temp lives in the same directory as the target so the rename is a same-filesystem
+     * the target. The temp lives in the target's own directory so the rename is a same-filesystem
      * move, which [StandardCopyOption.ATOMIC_MOVE] makes an all-or-nothing replace of any existing
      * target. This is why a crash mid-write cannot corrupt the previous good file.
+     *
+     * Assumption: a same-directory rename is atomic, which holds on the filesystems this app writes
+     * to (ext4/f2fs on device storage, exFAT on removable cards). If a filesystem cannot honour it,
+     * [Files.move] throws [java.nio.file.AtomicMoveNotSupportedException] (an [IOException]) and the
+     * save deliberately fails as a [StorageException] — we never silently fall back to a non-atomic
+     * copy that could truncate the good file.
      */
     private fun writeAtomically(target: File, text: String) {
         val tmp = File(target.parentFile, "${target.name}.tmp")
