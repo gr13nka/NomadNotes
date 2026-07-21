@@ -1,8 +1,19 @@
 package com.nomadnotes.core
 
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+
+/**
+ * Signals that a text handed to [NotesJson] is not a valid stored document of the requested type:
+ * it is malformed JSON, or JSON that does not match the page/notebook schema.
+ *
+ * It exists so the JSON library stays an implementation detail of [NotesJson]. Callers (notably the
+ * storage layer) catch this single core type to recognise a corrupt file, rather than depending on
+ * kotlinx-serialization's own exception classes.
+ */
+class NotesFormatException(message: String, cause: Throwable) : Exception(message, cause)
 
 /**
  * The one place the note model is turned into stored JSON and back.
@@ -33,9 +44,21 @@ object NotesJson {
 
     fun encodePage(page: Page): String = format.encodeToString(page)
 
-    fun decodePage(text: String): Page = format.decodeFromString(text)
+    /** Decodes a page document; throws [NotesFormatException] if [text] is not a valid page. */
+    fun decodePage(text: String): Page =
+        try {
+            format.decodeFromString(text)
+        } catch (e: SerializationException) {
+            throw NotesFormatException("Not a valid page document", e)
+        }
 
     fun encodeNotebook(notebook: Notebook): String = format.encodeToString(notebook)
 
-    fun decodeNotebook(text: String): Notebook = format.decodeFromString(text)
+    /** Decodes a notebook document; throws [NotesFormatException] if [text] is not a valid notebook. */
+    fun decodeNotebook(text: String): Notebook =
+        try {
+            format.decodeFromString(text)
+        } catch (e: SerializationException) {
+            throw NotesFormatException("Not a valid notebook document", e)
+        }
 }

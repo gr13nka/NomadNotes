@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+        Notebooks are stored as a plain folder tree the user can see, back up, and sync. Reaching a
+        user-visible location on shared storage needs All-Files access; without it the app falls
+        back to its own external files dir (see StorageRoots), so this permission is not mandatory.
+    -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"

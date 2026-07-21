@@ -42,6 +42,11 @@ dependencies {
 
     implementation(libs.androidx.core.ktx)
 
+    // Background storage I/O and autosave run on coroutines launched from the Activity's
+    // lifecycleScope (lifecycle-runtime-ktx).
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+
     // Compose is staged for later steps only. The spike Activity uses plain Views, so the
     // Compose build feature (and its compiler) is intentionally NOT enabled yet — that keeps
     // this build's memory footprint low. These declarations just put the libraries on the
