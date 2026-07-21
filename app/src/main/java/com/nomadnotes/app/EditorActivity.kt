@@ -197,7 +197,6 @@ class EditorActivity : Activity() {
         val holder = surfaceView.holder
         val canvas = holder.lockCanvas() ?: return
         try {
-            canvas.drawColor(Color.WHITE)
             canvas.drawBitmap(renderer.composite(), 0f, 0f, null)
         } finally {
             holder.unlockCanvasAndPost(canvas)

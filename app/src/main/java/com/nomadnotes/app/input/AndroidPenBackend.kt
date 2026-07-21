@@ -138,7 +138,6 @@ class AndroidPenBackend(
     }
 
     private fun drawComposite(canvas: Canvas) {
-        canvas.drawColor(Color.WHITE)
         canvas.drawBitmap(currentComposite(), 0f, 0f, null)
     }
 

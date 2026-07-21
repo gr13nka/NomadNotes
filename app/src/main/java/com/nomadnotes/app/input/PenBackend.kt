@@ -34,7 +34,11 @@ interface PenBackend {
     /** Stops capturing and releases the surface. */
     fun detach()
 
-    /** Receives finished gestures. Called on the UI thread. */
+    /**
+     * Receives finished gestures. Called on the UI thread. Every [StrokePoint] in a reported
+     * gesture arrives with its pressure normalized to 0..1 (0 = lightest, 1 = max hardware
+     * pressure); backends normalize device pressure values before constructing the points.
+     */
     interface Listener {
         /** A drawing gesture finished: its full path, to be turned into a stroke. */
         fun onStrokeFinished(points: List<StrokePoint>)

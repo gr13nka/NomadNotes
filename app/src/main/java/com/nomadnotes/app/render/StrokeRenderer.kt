@@ -85,8 +85,9 @@ class StrokeRenderer {
         widthBase * (MIN_WIDTH_FACTOR + PRESSURE_WIDTH_FACTOR * pressure)
 
     /**
-     * Input backends report pressure already normalized to 0..1; clamp defensively so a device that
-     * over-ranges cannot inflate the nib width beyond [widthBase].
+     * By the PenBackend contract a stroke's points arrive with pressure already normalized to
+     * 0..1; this clamp is defensive, so a backend that breaks that contract cannot inflate the nib
+     * width beyond [widthBase].
      */
     private fun normalizedPressure(pressure: Float): Float = pressure.coerceIn(0f, 1f)
 
