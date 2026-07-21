@@ -261,7 +261,11 @@ class EditorActivity : ComponentActivity() {
         override fun onStrokeFinished(points: List<StrokePoint>) {
             val session = session ?: return
             if (points.isEmpty()) return
-            val layerId = uiActiveLayer ?: session.page.mainLayerId
+            val page = session.page
+            // Fall back to the main layer if the active-layer selection has gone stale — e.g. a future
+            // structural op removed its layer without routing through afterModelEdit — so a finished
+            // stroke lands on a real layer instead of throwing.
+            val layerId = uiActiveLayer?.takeIf { id -> page.layers.any { it.id == id } } ?: page.mainLayerId
             val stroke = Stroke(
                 id = StrokeId.random(),
                 tool = uiTool,

@@ -34,8 +34,19 @@ class TemplateResolver(private val templatesDir: File) {
     private var width = 0
     private var height = 0
 
-    // Keyed by stored ref string ("builtin:lines", "user:sketch.png"), every bitmap at width×height.
-    private val cache = HashMap<String, Bitmap>()
+    // Each cached template is a full-screen ARGB_8888 bitmap — ~18 MB on the 1860×2418 panel — and a
+    // page already keeps up to ~100 MB of layer bitmaps, on a memory-constrained device. So the two
+    // built-ins stay pinned (cheap to keep, cheaper than redrawing), but decoded user images are held
+    // in an LRU capped at [MAX_USER_CACHE]: cycling through several image templates can never pile
+    // their bitmaps up. Both caches hold bitmaps at the current width×height and are dropped on resize.
+    private val builtinCache = HashMap<String, Bitmap>()
+    private val userCache = object : LinkedHashMap<String, Bitmap>(4, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>): Boolean {
+            if (size <= MAX_USER_CACHE) return false
+            eldest.value.recycle()
+            return true
+        }
+    }
 
     /**
      * The background bitmap for [ref] at the given surface size, or null for a white page. Reuses a
@@ -44,7 +55,7 @@ class TemplateResolver(private val templatesDir: File) {
     fun resolve(ref: String?, width: Int, height: Int): Bitmap? {
         if (width <= 0 || height <= 0) return null
         if (width != this.width || height != this.height) {
-            clearCache()
+            clearCaches()
             this.width = width
             this.height = height
         }
@@ -55,28 +66,29 @@ class TemplateResolver(private val templatesDir: File) {
         }
         return when (template) {
             TemplateRef.Blank -> null
-            TemplateRef.Lines -> cache.getOrPut(TemplateRef.LINES) { drawLines() }
-            TemplateRef.Grid -> cache.getOrPut(TemplateRef.GRID) { drawGrid() }
+            TemplateRef.Lines -> builtinCache.getOrPut(TemplateRef.LINES) { drawLines() }
+            TemplateRef.Grid -> builtinCache.getOrPut(TemplateRef.GRID) { drawGrid() }
             is TemplateRef.UserImage -> resolveUserImage(ref!!, template.filename)
         }
     }
 
     /** Recycles every cached bitmap. Safe to call repeatedly; the next [resolve] repopulates. */
     fun release() {
-        clearCache()
+        clearCaches()
         width = 0
         height = 0
     }
 
     private fun resolveUserImage(ref: String, filename: String): Bitmap? {
-        cache[ref]?.let { return it }
+        // A get bumps the ref to most-recently-used; a put may evict (and recycle) the eldest.
+        userCache[ref]?.let { return it }
         val decoded = decodeSampled(File(templatesDir, filename)) ?: run {
             Log.w(TAG, "Template image missing or unreadable, showing a blank page: $filename")
             return null
         }
         val filled = centerCrop(decoded)
         decoded.recycle()
-        cache[ref] = filled
+        userCache[ref] = filled
         return filled
     }
 
@@ -148,13 +160,18 @@ class TemplateResolver(private val templatesDir: File) {
         return sample
     }
 
-    private fun clearCache() {
-        cache.values.forEach { it.recycle() }
-        cache.clear()
+    private fun clearCaches() {
+        builtinCache.values.forEach { it.recycle() }
+        builtinCache.clear()
+        userCache.values.forEach { it.recycle() }
+        userCache.clear()
     }
 
     private companion object {
         const val TAG = "TemplateResolver"
+
+        /** How many decoded user-image templates to keep before evicting the least-recently-used. */
+        const val MAX_USER_CACHE = 2
 
         /** Spacing between ruled lines (and grid squares), in page pixels. */
         const val LINE_SPACING_PX = 90f
