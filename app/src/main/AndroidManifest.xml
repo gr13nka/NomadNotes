@@ -14,14 +14,20 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
+        <!-- The entry point: the notebook picker. It launches EditorActivity for a chosen notebook. -->
         <activity
-            android:name=".app.EditorActivity"
+            android:name=".app.NotebookListActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Opened for a specific notebook (name passed as an intent extra); not the launcher. -->
+        <activity
+            android:name=".app.EditorActivity"
+            android:exported="false" />
 
         <!-- Kept as the raw-drawing reference; no longer the launcher. -->
         <activity

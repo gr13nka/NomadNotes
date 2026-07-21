@@ -95,6 +95,12 @@ class PageEditSession(initialPage: Page) {
         commit(SetLayerVisible(layerId, visible))
     }
 
+    /** Sets the page's background template ([Page.templateRef]). No-op if it already has that ref. */
+    fun setTemplateRef(ref: String?) {
+        if (page.templateRef == ref) return
+        commit(SetTemplateRef(ref))
+    }
+
     /** Reverts the most recent change. Returns false when there is nothing to undo. */
     fun undo(): Boolean {
         val command = undoStack.removeFirstOrNull() ?: return false

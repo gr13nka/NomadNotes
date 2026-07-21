@@ -1,31 +1,59 @@
 package com.nomadnotes.app
 
-import android.content.ActivityNotFoundException
-import android.content.Intent
-import android.graphics.Color
-import android.graphics.Rect
-import android.net.Uri
 import android.os.Bundle
-import android.os.Environment
-import android.provider.Settings
 import android.util.Log
-import android.view.Gravity
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.View
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.LinearLayout
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.nomadnotes.R
 import com.nomadnotes.app.input.AndroidPenBackend
 import com.nomadnotes.app.input.PenBackend
 import com.nomadnotes.app.render.PageRenderer
+import com.nomadnotes.app.render.TemplateRef
+import com.nomadnotes.app.render.TemplateResolver
 import com.nomadnotes.app.storage.NotebookStorage
 import com.nomadnotes.app.storage.notebooksRoot
-import com.nomadnotes.core.Layer
+import com.nomadnotes.app.ui.ConfirmDialog
+import com.nomadnotes.app.ui.EinkBlack
+import com.nomadnotes.app.ui.EinkButton
+import com.nomadnotes.app.ui.EinkCheckbox
+import com.nomadnotes.app.ui.EinkGray
+import com.nomadnotes.app.ui.EinkRadioDot
+import com.nomadnotes.app.ui.EinkTheme
+import com.nomadnotes.app.ui.EinkToggle
+import com.nomadnotes.app.ui.EinkWhite
+import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.Notebook
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.Stroke
@@ -35,7 +63,6 @@ import com.nomadnotes.core.Tool
 import com.nomadnotes.core.edit.PageEditSession
 import com.nomadnotes.core.geometry.Vec2
 import com.nomadnotes.core.geometry.eraserHit
-import com.nomadnotes.pen.onyx.OnyxRawDrawingController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -45,60 +72,90 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
+/** Nib-width presets the toolbar offers, in page pixels before the renderer applies pressure. */
+private enum class StrokeWidth(val px: Float) { S(2f), M(4f), L(8f) }
+
+/** Ink-darkness presets ([Stroke.grayLevel]: 255 = black); the marker keeps its own translucency. */
+private enum class InkShade(val level: Int) { BLACK(255), DARK(170), LIGHT(85) }
+
+/** A layer as the layers panel shows it: identity, label, visibility, and whether it is undeletable. */
+private data class LayerRow(val id: LayerId, val name: String, val visible: Boolean, val isMain: Boolean)
+
+/** Dims the screen behind an open panel and captures taps to dismiss it; no fade, instant. */
+private val ScrimColor = Color(0x33000000)
+
 /**
- * A minimal end-to-end harness for the page-editing pipeline, exercising it on a device before the
- * real editor UI exists.
+ * The notebook editor: a full page-editing surface with a Compose toolbar, layers panel, template
+ * picker, and page navigation.
  *
- * It opens (or first-time creates) a "Default" notebook through [NotebookStorage] and wires its
- * first [Page] through the pieces this project introduces: a [PageEditSession] (the undoable model),
- * a [PageRenderer] (page to the bitmap shown on screen), and a [PenBackend] (hardware input to
- * strokes). Every edit is persisted: a debounced autosave while drawing, and an immediate flush on
- * pause. The views are built in code — a full-bleed [SurfaceView] under a row of tool buttons — and
- * are intentionally throwaway; the real editor UI (and a notebook picker) is a later step.
+ * The editing core is unchanged from the earlier harness and stays deliberately imperative: a
+ * [SurfaceView] the [PageRenderer] blits into, an [AndroidPenBackend] feeding a [PageEditSession],
+ * and a debounced autosave (with a synchronous flush on pause). Only the chrome is Compose. The
+ * canvas lives in an [AndroidView] that reads no Compose state, so toolbar changes never recompose
+ * it; the toolbar and panels read hoisted [mutableStateOf] fields that the imperative editing
+ * methods keep in step with the model.
  *
- * Input always runs through [AndroidPenBackend], even on Boox hardware. There it means laggy
- * touch-based ink rather than the raw-drawing pen: wiring the Onyx backend into the editor is a
- * separate step, and the device spike remains the proof that raw drawing works.
+ * The notebook to open is named by [EXTRA_NOTEBOOK_NAME] (falling back to [DEFAULT_NOTEBOOK]); it is
+ * created on first use. As in the harness, a storage fault degrades to an unsaved in-memory page
+ * rather than bricking the editor.
  */
 class EditorActivity : ComponentActivity() {
 
     private lateinit var surfaceView: SurfaceView
-    private lateinit var topBar: LinearLayout
     private lateinit var storage: NotebookStorage
+    private lateinit var templateResolver: TemplateResolver
 
     private val renderer = PageRenderer()
     private val backend = AndroidPenBackend { renderer.composite() }
 
-    // Populated on a background thread once the notebook loads; both are read only on the main thread
-    // after that, except for the immutable page snapshot autosave grabs (see saveCurrentPage).
+    // Loaded off the main thread once, then read only on the main thread. `notebook` is null when
+    // storage is unavailable — the editor still runs on an in-memory page, it just cannot persist.
     private var notebook: Notebook? = null
     private var session: PageEditSession? = null
 
-    private var currentTool: Tool = Tool.PEN
+    private var surfaceWidth = 0
+    private var surfaceHeight = 0
     private var backendAttached = false
     private var surfaceReady = false
 
     private val saveMutex = Mutex()
     private var autosaveJob: Job? = null
 
+    // Toolbar/panel state, hoisted here so the AndroidView canvas can read none of it. The pen
+    // listener also reads the drawing ones (tool/width/shade/active layer), but a plain value read
+    // creates no recomposition dependency.
+    private var uiTool by mutableStateOf(Tool.PEN)
+    private var uiEraser by mutableStateOf(false)
+    private var uiWidth by mutableStateOf(StrokeWidth.M)
+    private var uiShade by mutableStateOf(InkShade.BLACK)
+    private var uiCanUndo by mutableStateOf(false)
+    private var uiCanRedo by mutableStateOf(false)
+    private var uiPageIndex by mutableStateOf(0)
+    private var uiPageCount by mutableStateOf(1)
+    private var uiLayersOpen by mutableStateOf(false)
+    private var uiTemplateOpen by mutableStateOf(false)
+    private var uiLayers by mutableStateOf<List<LayerRow>>(emptyList())
+    private var uiActiveLayer by mutableStateOf<LayerId?>(null)
+    private var uiTemplateRef by mutableStateOf<String?>(null)
+    private var uiTemplateFiles by mutableStateOf<List<String>>(emptyList())
+    private var uiDeletePageDialog by mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val root = notebooksRoot(this)
-        Log.i(TAG, "Storage root: ${root.path} (allFilesAccess=${Environment.isExternalStorageManager()})")
+        Log.i(TAG, "Storage root: ${root.path}")
         storage = NotebookStorage(root)
-        requestAllFilesAccessOnce()
-        setContentView(buildContentView())
+        templateResolver = TemplateResolver(storage.templatesDir)
+        surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(surfaceCallback)
-        openDefaultNotebook()
+        setContent { EinkTheme { EditorScreen() } }
+        openNotebookFromIntent()
     }
 
     override fun onPause() {
         super.onPause()
-        // onPause can be the last callback before the process is killed, so persist synchronously
-        // here rather than handing the save to a background job that might not finish. The page JSON
-        // is small and the write is atomic, so the brief main-thread block is acceptable; runBlocking
-        // (not a fire-and-forget launch) is what guarantees the save completes before we return.
-        // Cancel the pending debounce first so the snapshot saved below is the last write to land.
+        // onPause can be the last callback before the process is killed, so persist synchronously:
+        // cancel the pending debounce, then block on the final save so it lands before we return.
         autosaveJob?.cancel()
         if (notebook != null && session != null) {
             runBlocking { saveCurrentPage() }
@@ -108,46 +165,21 @@ class EditorActivity : ComponentActivity() {
     override fun onDestroy() {
         backend.detach()
         renderer.release()
+        templateResolver.release()
         super.onDestroy()
     }
 
-    /**
-     * Prompts for All-Files access at most once per process (a declined prompt is not re-shown, so
-     * there is no nag loop). The app works without it: [notebooksRoot] falls back to app-private
-     * storage, only the storage location differs.
-     */
-    private fun requestAllFilesAccessOnce() {
-        if (Environment.isExternalStorageManager() || allFilesAccessRequested) return
-        allFilesAccessRequested = true
-        val perApp = Intent(
-            Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION,
-            Uri.fromParts("package", packageName, null),
-        )
-        try {
-            startActivity(perApp)
-        } catch (e: ActivityNotFoundException) {
-            // A few devices lack the per-app screen; fall back to the global All-Files list.
-            try {
-                startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-            } catch (e2: ActivityNotFoundException) {
-                Log.w(TAG, "No All-Files access settings screen; staying on the fallback root", e2)
-            }
-        }
-    }
+    // --- notebook / page loading -----------------------------------------------------------
 
-    /**
-     * Opens (or first-time creates) the [DEFAULT_NOTEBOOK] and loads its first page off the main
-     * thread, then installs it on the main thread. If storage cannot be read the editor still opens
-     * on an unsaved in-memory page, so a disk fault never bricks the harness.
-     */
-    private fun openDefaultNotebook() {
+    private fun openNotebookFromIntent() {
+        val name = intent.getStringExtra(EXTRA_NOTEBOOK_NAME) ?: DEFAULT_NOTEBOOK
         lifecycleScope.launch {
             val loaded = withContext(Dispatchers.IO) {
                 runCatching {
-                    val nb = if (storage.listNotebooks().any { it.name == DEFAULT_NOTEBOOK }) {
-                        storage.loadNotebook(DEFAULT_NOTEBOOK)
+                    val nb = if (storage.listNotebooks().any { it.name == name }) {
+                        storage.loadNotebook(name)
                     } else {
-                        storage.createNotebook(DEFAULT_NOTEBOOK)
+                        storage.createNotebook(name)
                     }
                     nb to storage.loadPage(nb, nb.pageIds.first())
                 }
@@ -155,170 +187,61 @@ class EditorActivity : ComponentActivity() {
             loaded
                 .onSuccess { (nb, page) ->
                     notebook = nb
-                    session = PageEditSession(page)
+                    installPage(page, index = 0)
                 }
                 .onFailure { e ->
                     Log.e(TAG, "Storage unavailable; editing an unsaved in-memory page", e)
-                    session = PageEditSession(Page.create())
+                    notebook = null
+                    installPage(Page.create(), index = 0)
                 }
             startEditingIfReady()
         }
     }
 
-    private fun buildContentView(): View {
-        val root = FrameLayout(this)
-
-        surfaceView = SurfaceView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-        }
-        root.addView(surfaceView)
-
-        val padding = (16 * resources.displayMetrics.density).toInt()
-        topBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.LTGRAY)
-            setPadding(padding, padding, padding, padding)
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP,
-            )
-            addToolButton(R.string.action_pen) { selectTool(Tool.PEN) }
-            addToolButton(R.string.action_marker) { selectTool(Tool.MARKER) }
-            addToolButton(R.string.action_eraser) { backend.eraseMode = true }
-            addToolButton(R.string.action_undo) { undo() }
-            addToolButton(R.string.action_redo) { redo() }
-            addToolButton(R.string.action_clear) { clearPage() }
-        }
-        root.addView(topBar)
-
-        return root
-    }
-
-    private fun LinearLayout.addToolButton(labelRes: Int, onClick: () -> Unit) {
-        addView(
-            Button(this@EditorActivity).apply {
-                setText(labelRes)
-                setOnClickListener { onClick() }
-            },
-        )
+    /** Installs [page] as the one being edited and syncs every toolbar state to it. Does not render. */
+    private fun installPage(page: Page, index: Int) {
+        session = PageEditSession(page)
+        uiPageIndex = index
+        uiPageCount = notebook?.pageIds?.size ?: 1
+        uiActiveLayer = page.mainLayerId
+        uiTemplateRef = page.templateRef
+        refreshUndoRedo()
+        refreshLayers()
     }
 
     private val surfaceCallback = object : SurfaceHolder.Callback {
         override fun surfaceCreated(holder: SurfaceHolder) = Unit
 
         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+            surfaceWidth = width
+            surfaceHeight = height
             renderer.resize(width, height)
             surfaceReady = true
             startEditingIfReady()
-            // Keep the toolbar tappable: pen input landing on it is ignored.
-            backend.setExcludeRects(listOf(relativeRect(surfaceView, topBar)))
         }
 
         override fun surfaceDestroyed(holder: SurfaceHolder) = Unit
     }
 
-    /**
-     * The first render and backend attach, run once both prerequisites hold: the surface has a size
-     * and the page has loaded. Whichever of the two finishes second drives it; a later surface
-     * resize re-renders but does not re-attach.
-     */
+    /** First render plus backend attach, once both the surface has a size and a page has loaded. */
     private fun startEditingIfReady() {
-        val session = session ?: return
+        session ?: return
         if (!surfaceReady) return
-        renderer.renderFull(session.page)
-        presentComposite()
+        renderPage()
         if (!backendAttached) {
             backend.attach(surfaceView, penListener)
             backendAttached = true
         }
     }
 
-    private val penListener = object : PenBackend.Listener {
-        override fun onStrokeFinished(points: List<StrokePoint>) {
-            val session = session ?: return
-            if (points.isEmpty()) return
-            val layerId = session.page.mainLayerId
-            val stroke = Stroke(
-                id = StrokeId.random(),
-                tool = currentTool,
-                widthBase = STROKE_WIDTH_BASE,
-                grayLevel = STROKE_GRAY_LEVEL,
-                points = points,
-            )
-            session.addStroke(layerId, stroke)
-            renderer.appendStroke(layerId, stroke)
-            presentComposite()
-            scheduleAutosave()
-        }
+    // --- rendering -------------------------------------------------------------------------
 
-        override fun onEraseGesture(points: List<StrokePoint>) = eraseAlong(points)
-    }
-
-    private fun selectTool(tool: Tool) {
-        currentTool = tool
-        backend.eraseMode = false
-    }
-
-    private fun undo() {
+    /** Resolves the page's template and rebuilds the whole composite. Use for anything but a lone new stroke. */
+    private fun renderPage() {
         val session = session ?: return
-        if (session.undo()) {
-            rerenderPage()
-            scheduleAutosave()
-        }
-    }
-
-    private fun redo() {
-        val session = session ?: return
-        if (session.redo()) {
-            rerenderPage()
-            scheduleAutosave()
-        }
-    }
-
-    private fun clearPage() {
-        val session = session ?: return
-        val layerId = session.page.mainLayerId
-        val ids = activeLayer(session).strokes.map { it.id }
-        if (ids.isEmpty()) return
-        session.eraseStrokes(layerId, ids)
-        rerenderPage()
-        scheduleAutosave()
-    }
-
-    /**
-     * Erases every stroke the eraser gesture passed over: each gesture point is a small eraser
-     * disc, and any active-layer stroke it touches is removed as one undoable step. The page is
-     * repainted even when nothing was erased, to wipe the eraser preview the backend left behind.
-     */
-    private fun eraseAlong(points: List<StrokePoint>) {
-        val session = session ?: return
-        val strokes = activeLayer(session).strokes
-        val hits = LinkedHashSet<StrokeId>()
-        for (point in points) {
-            val center = Vec2(point.x, point.y)
-            for (stroke in strokes) {
-                if (stroke.id !in hits && eraserHit(stroke, center, ERASER_RADIUS)) hits.add(stroke.id)
-            }
-        }
-        if (hits.isNotEmpty()) {
-            session.eraseStrokes(session.page.mainLayerId, hits)
-            scheduleAutosave()
-        }
-        rerenderPage()
-    }
-
-    private fun activeLayer(session: PageEditSession): Layer {
-        val layerId = session.page.mainLayerId
-        return session.page.layers.first { it.id == layerId }
-    }
-
-    private fun rerenderPage() {
-        val session = session ?: return
-        renderer.renderFull(session.page)
+        if (surfaceWidth <= 0 || surfaceHeight <= 0) return
+        val template = templateResolver.resolve(session.page.templateRef, surfaceWidth, surfaceHeight)
+        renderer.renderFull(session.page, template)
         presentComposite()
     }
 
@@ -332,7 +255,245 @@ class EditorActivity : ComponentActivity() {
         }
     }
 
-    /** (Re)starts the 5s idle timer; the previous pending save, if any, is cancelled. */
+    // --- pen input -------------------------------------------------------------------------
+
+    private val penListener = object : PenBackend.Listener {
+        override fun onStrokeFinished(points: List<StrokePoint>) {
+            val session = session ?: return
+            if (points.isEmpty()) return
+            val layerId = uiActiveLayer ?: session.page.mainLayerId
+            val stroke = Stroke(
+                id = StrokeId.random(),
+                tool = uiTool,
+                widthBase = uiWidth.px,
+                grayLevel = uiShade.level,
+                points = points,
+            )
+            session.addStroke(layerId, stroke)
+            renderer.appendStroke(layerId, stroke)
+            presentComposite()
+            refreshUndoRedo()
+            scheduleAutosave()
+        }
+
+        override fun onEraseGesture(points: List<StrokePoint>) = eraseAlong(points)
+    }
+
+    /**
+     * Erases every active-layer stroke the eraser gesture passed over as one undoable step, then
+     * repaints — even when nothing was erased — to wipe the eraser preview the backend left behind.
+     */
+    private fun eraseAlong(points: List<StrokePoint>) {
+        val session = session ?: return
+        val layerId = uiActiveLayer ?: session.page.mainLayerId
+        val layer = session.page.layers.firstOrNull { it.id == layerId }
+        if (layer != null) {
+            val hits = LinkedHashSet<StrokeId>()
+            for (point in points) {
+                val center = Vec2(point.x, point.y)
+                for (stroke in layer.strokes) {
+                    if (stroke.id !in hits && eraserHit(stroke, center, ERASER_RADIUS)) hits.add(stroke.id)
+                }
+            }
+            if (hits.isNotEmpty()) {
+                session.eraseStrokes(layerId, hits)
+                refreshUndoRedo()
+                scheduleAutosave()
+            }
+        }
+        // Repaint regardless, to wipe the eraser preview the backend left on the surface.
+        renderPage()
+    }
+
+    // --- toolbar actions -------------------------------------------------------------------
+
+    private fun selectTool(tool: Tool) {
+        uiTool = tool
+        uiEraser = false
+        backend.eraseMode = false
+    }
+
+    private fun selectEraser() {
+        uiEraser = true
+        backend.eraseMode = true
+    }
+
+    private fun undo() {
+        val session = session ?: return
+        if (session.undo()) afterModelEdit()
+    }
+
+    private fun redo() {
+        val session = session ?: return
+        if (session.redo()) afterModelEdit()
+    }
+
+    /**
+     * Shared tail for edits that can restructure the page (undo/redo, erase, layer and template
+     * changes): re-validate the active-layer selection, resync the dependent toolbar state, repaint
+     * from scratch, and schedule a save.
+     */
+    private fun afterModelEdit() {
+        val session = session ?: return
+        if (uiActiveLayer == null || session.page.layers.none { it.id == uiActiveLayer }) {
+            uiActiveLayer = session.page.mainLayerId
+        }
+        uiTemplateRef = session.page.templateRef
+        refreshUndoRedo()
+        refreshLayers()
+        renderPage()
+        scheduleAutosave()
+    }
+
+    // --- layers ----------------------------------------------------------------------------
+
+    private fun toggleLayerVisible(id: LayerId, visible: Boolean) {
+        session?.setLayerVisible(id, visible)
+        afterModelEdit()
+    }
+
+    /** Points new strokes and the eraser at a layer. A UI-only choice, so it makes no undo entry. */
+    private fun setActiveLayer(id: LayerId) {
+        uiActiveLayer = id
+    }
+
+    private fun addLayer() {
+        val session = session ?: return
+        if (session.addLayer("Layer ${session.page.layers.size + 1}")) afterModelEdit()
+    }
+
+    private fun removeLayer(id: LayerId) {
+        val session = session ?: return
+        if (session.removeLayer(id)) afterModelEdit()
+    }
+
+    // --- template --------------------------------------------------------------------------
+
+    private fun setTemplate(ref: String?) {
+        session?.setTemplateRef(ref)
+        afterModelEdit()
+    }
+
+    private fun loadTemplateFiles() {
+        lifecycleScope.launch {
+            uiTemplateFiles = withContext(Dispatchers.IO) {
+                runCatching {
+                    storage.templatesDir
+                        .listFiles { f -> f.isFile && f.extension.lowercase() in TEMPLATE_IMAGE_EXTS }
+                        ?.map { it.name }
+                        ?.sorted()
+                        ?: emptyList()
+                }.getOrDefault(emptyList())
+            }
+        }
+    }
+
+    // --- panels ----------------------------------------------------------------------------
+
+    private fun toggleLayersPanel() {
+        uiLayersOpen = !uiLayersOpen
+        if (uiLayersOpen) {
+            uiTemplateOpen = false
+            refreshLayers()
+        }
+        updateBackendEnabled()
+    }
+
+    private fun toggleTemplatePanel() {
+        uiTemplateOpen = !uiTemplateOpen
+        if (uiTemplateOpen) {
+            uiLayersOpen = false
+            loadTemplateFiles()
+        }
+        updateBackendEnabled()
+    }
+
+    /** Pen capture is off while a panel is open, so a tap meant for the panel never draws a stroke. */
+    private fun updateBackendEnabled() {
+        backend.setEnabled(!uiLayersOpen && !uiTemplateOpen)
+    }
+
+    // --- page navigation -------------------------------------------------------------------
+
+    private fun goToPage(index: Int) {
+        val notebook = notebook ?: return
+        if (index < 0 || index >= notebook.pageIds.size || index == uiPageIndex) return
+        autosaveJob?.cancel()
+        lifecycleScope.launch {
+            saveCurrentPage()
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching { storage.loadPage(notebook, notebook.pageIds[index]) }
+            }
+            loaded
+                .onSuccess { page ->
+                    installPage(page, index)
+                    renderPage()
+                }
+                .onFailure { e -> Log.e(TAG, "Could not load page $index", e) }
+        }
+    }
+
+    private fun insertPageAfterCurrent() {
+        val current = notebook ?: return
+        autosaveJob?.cancel()
+        lifecycleScope.launch {
+            saveCurrentPage()
+            val newPage = Page.create()
+            val at = uiPageIndex + 1
+            val updated = current.copy(
+                pageIds = current.pageIds.toMutableList().apply { add(at, newPage.id) },
+            )
+            val saved = withContext(Dispatchers.IO) {
+                runCatching {
+                    saveMutex.withLock {
+                        storage.savePage(updated, newPage)
+                        storage.saveNotebook(updated)
+                    }
+                }.isSuccess
+            }
+            if (!saved) {
+                Log.e(TAG, "Could not insert a page")
+                return@launch
+            }
+            notebook = updated
+            installPage(newPage, at)
+            renderPage()
+        }
+    }
+
+    private fun deleteCurrentPage() {
+        val current = notebook ?: return
+        if (current.pageIds.size <= 1) return
+        autosaveJob?.cancel()
+        lifecycleScope.launch {
+            val removedId = current.pageIds[uiPageIndex]
+            val remaining = current.pageIds.toMutableList().apply { removeAt(uiPageIndex) }
+            val updated = current.copy(pageIds = remaining)
+            val newIndex = uiPageIndex.coerceIn(0, remaining.size - 1)
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    // Rewrite notebook.json (dropping the id) before deleting the file, so a crash
+                    // between the two leaves a harmless orphan file, not a dangling id.
+                    saveMutex.withLock {
+                        storage.saveNotebook(updated)
+                        storage.deletePage(updated, removedId)
+                    }
+                    storage.loadPage(updated, remaining[newIndex])
+                }
+            }
+            result
+                .onSuccess { page ->
+                    notebook = updated
+                    installPage(page, newIndex)
+                    renderPage()
+                }
+                .onFailure { e -> Log.e(TAG, "Could not delete the page", e) }
+        }
+    }
+
+    // --- autosave --------------------------------------------------------------------------
+
+    /** (Re)starts the idle timer; the previous pending save, if any, is cancelled. */
     private fun scheduleAutosave() {
         autosaveJob?.cancel()
         autosaveJob = lifecycleScope.launch {
@@ -344,46 +505,215 @@ class EditorActivity : ComponentActivity() {
     private suspend fun saveCurrentPage() {
         val notebook = notebook ?: return
         val session = session ?: return
-        // The model is immutable and swapped wholesale on every edit, so reading session.page grabs
-        // a consistent snapshot by reference — no copy or lock needed to hand it to serialization.
-        // Read it here, on the caller's thread, before dispatching to IO.
+        // The model is immutable and swapped wholesale per edit, so reading session.page here (on the
+        // caller's thread, before dispatching to IO) grabs a consistent snapshot to serialize.
         val page = session.page
         withContext(Dispatchers.IO) {
-            // Acquire and release the lock entirely on the IO dispatcher, so a save never needs the
-            // main thread to make progress — that is what lets onPause's runBlocking wait on an
-            // in-flight save without deadlocking. One writer at a time; the newest snapshot wins.
             saveMutex.withLock { storage.savePage(notebook, page) }
         }
     }
 
-    /** Rectangle of [child] expressed in [parent]'s local coordinates. */
-    private fun relativeRect(parent: View, child: View): Rect {
-        val parentLocation = IntArray(2).also { parent.getLocationOnScreen(it) }
-        val childLocation = IntArray(2).also { child.getLocationOnScreen(it) }
-        return Rect().also { child.getLocalVisibleRect(it) }.apply {
-            offset(childLocation[0] - parentLocation[0], childLocation[1] - parentLocation[1])
+    // --- state sync ------------------------------------------------------------------------
+
+    private fun refreshUndoRedo() {
+        val session = session ?: return
+        uiCanUndo = session.canUndo
+        uiCanRedo = session.canRedo
+    }
+
+    private fun refreshLayers() {
+        val session = session ?: return
+        val mainId = session.page.mainLayerId
+        // Top-most layer first in the panel; page.layers is back-to-front.
+        uiLayers = session.page.layers.asReversed().map {
+            LayerRow(id = it.id, name = it.name, visible = it.visible, isMain = it.id == mainId)
         }
     }
 
-    private companion object {
-        const val TAG = "EditorActivity"
+    // --- Compose UI ------------------------------------------------------------------------
 
-        /** The single notebook this harness edits until the notebook picker arrives in a later step. */
-        const val DEFAULT_NOTEBOOK = "Default"
+    @Composable
+    private fun EditorScreen() {
+        Column(Modifier.fillMaxSize()) {
+            EditorToolbar()
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                CanvasView()
+                EditorOverlays()
+            }
+        }
+    }
+
+    /** The drawing surface. Reads no Compose state and has no update block, so it never recomposes. */
+    @Composable
+    private fun CanvasView() {
+        AndroidView(factory = { surfaceView }, modifier = Modifier.fillMaxSize())
+    }
+
+    @Composable
+    private fun EditorToolbar() {
+        Column(Modifier.fillMaxWidth().background(EinkWhite)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                EinkToggle(stringResource(R.string.action_pen), selected = !uiEraser && uiTool == Tool.PEN) { selectTool(Tool.PEN) }
+                EinkToggle(stringResource(R.string.action_pencil), selected = !uiEraser && uiTool == Tool.PENCIL) { selectTool(Tool.PENCIL) }
+                EinkToggle(stringResource(R.string.action_marker), selected = !uiEraser && uiTool == Tool.MARKER) { selectTool(Tool.MARKER) }
+                EinkToggle(stringResource(R.string.action_eraser), selected = uiEraser) { selectEraser() }
+                ToolbarDivider()
+
+                EinkToggle(stringResource(R.string.width_small), selected = uiWidth == StrokeWidth.S) { uiWidth = StrokeWidth.S }
+                EinkToggle(stringResource(R.string.width_medium), selected = uiWidth == StrokeWidth.M) { uiWidth = StrokeWidth.M }
+                EinkToggle(stringResource(R.string.width_large), selected = uiWidth == StrokeWidth.L) { uiWidth = StrokeWidth.L }
+                ToolbarDivider()
+
+                EinkToggle(stringResource(R.string.shade_black), selected = uiShade == InkShade.BLACK) { uiShade = InkShade.BLACK }
+                EinkToggle(stringResource(R.string.shade_dark), selected = uiShade == InkShade.DARK) { uiShade = InkShade.DARK }
+                EinkToggle(stringResource(R.string.shade_light), selected = uiShade == InkShade.LIGHT) { uiShade = InkShade.LIGHT }
+                ToolbarDivider()
+
+                EinkButton(stringResource(R.string.action_undo), enabled = uiCanUndo) { undo() }
+                EinkButton(stringResource(R.string.action_redo), enabled = uiCanRedo) { redo() }
+                ToolbarDivider()
+
+                EinkToggle(stringResource(R.string.action_layers), selected = uiLayersOpen) { toggleLayersPanel() }
+                EinkToggle(stringResource(R.string.action_template), selected = uiTemplateOpen) { toggleTemplatePanel() }
+                ToolbarDivider()
+
+                EinkButton(stringResource(R.string.nav_prev), enabled = uiPageIndex > 0) { goToPage(uiPageIndex - 1) }
+                Text(
+                    stringResource(R.string.page_position, uiPageIndex + 1, uiPageCount),
+                    color = EinkBlack,
+                    fontSize = 15.sp,
+                )
+                EinkButton(stringResource(R.string.nav_next), enabled = uiPageIndex < uiPageCount - 1) { goToPage(uiPageIndex + 1) }
+                EinkButton(stringResource(R.string.action_insert_page)) { insertPageAfterCurrent() }
+                EinkButton(stringResource(R.string.action_delete_page), enabled = uiPageCount > 1) { uiDeletePageDialog = true }
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(EinkBlack))
+        }
+    }
+
+    @Composable
+    private fun ToolbarDivider() {
+        Box(Modifier.width(1.dp).height(28.dp).background(EinkGray))
+    }
+
+    /** The panels and dialogs stacked over the canvas. Isolated here so their state reads never touch [CanvasView]. */
+    @Composable
+    private fun BoxScope.EditorOverlays() {
+        if (uiLayersOpen) {
+            Scrim { toggleLayersPanel() }
+            LayersPanel(Modifier.align(Alignment.TopEnd).fillMaxHeight())
+        }
+        if (uiTemplateOpen) {
+            Scrim { toggleTemplatePanel() }
+            TemplatePanel(Modifier.align(Alignment.TopEnd).fillMaxHeight())
+        }
+        if (uiDeletePageDialog) {
+            ConfirmDialog(
+                title = stringResource(R.string.delete_page_title),
+                message = stringResource(R.string.delete_page_message),
+                confirmLabel = stringResource(R.string.action_delete),
+                cancelLabel = stringResource(R.string.action_cancel),
+                onConfirm = {
+                    uiDeletePageDialog = false
+                    deleteCurrentPage()
+                },
+                onDismiss = { uiDeletePageDialog = false },
+            )
+        }
+    }
+
+    @Composable
+    private fun Scrim(onDismiss: () -> Unit) {
+        Box(Modifier.fillMaxSize().background(ScrimColor).clickable(onClick = onDismiss))
+    }
+
+    @Composable
+    private fun LayersPanel(modifier: Modifier) {
+        Column(
+            modifier = modifier
+                .width(280.dp)
+                .background(EinkWhite)
+                .padding(12.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(stringResource(R.string.layers_title), color = EinkBlack, fontSize = 18.sp)
+            for (row in uiLayers) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    EinkCheckbox(checked = row.visible) { toggleLayerVisible(row.id, it) }
+                    EinkRadioDot(selected = uiActiveLayer == row.id) { setActiveLayer(row.id) }
+                    Text(row.name, color = EinkBlack, fontSize = 15.sp, modifier = Modifier.weight(1f), maxLines = 1)
+                    EinkButton(stringResource(R.string.item_delete), enabled = !row.isMain) { removeLayer(row.id) }
+                }
+            }
+            EinkButton(stringResource(R.string.layers_add), enabled = uiLayers.size < PageEditSession.MAX_LAYERS) { addLayer() }
+        }
+    }
+
+    @Composable
+    private fun TemplatePanel(modifier: Modifier) {
+        val current = uiTemplateRef
+        val blankLabel = stringResource(R.string.template_blank)
+        val linesLabel = stringResource(R.string.template_lines)
+        val gridLabel = stringResource(R.string.template_grid)
+        val options = buildList {
+            add(blankLabel to TemplateRef.BLANK)
+            add(linesLabel to TemplateRef.LINES)
+            add(gridLabel to TemplateRef.GRID)
+            uiTemplateFiles.forEach { add(it to (TemplateRef.USER_PREFIX + it)) }
+        }
+        Column(
+            modifier = modifier
+                .width(320.dp)
+                .background(EinkWhite)
+                .padding(12.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(stringResource(R.string.template_title), color = EinkBlack, fontSize = 18.sp)
+            for (pair in options.chunked(2)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for ((label, ref) in pair) {
+                        val selected = if (ref == TemplateRef.BLANK) {
+                            TemplateRef.parse(current) == TemplateRef.Blank
+                        } else {
+                            current == ref
+                        }
+                        EinkToggle(label, selected = selected, modifier = Modifier.weight(1f)) { setTemplate(ref) }
+                    }
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "EditorActivity"
+
+        /** Intent extra naming the notebook to open; absent means [DEFAULT_NOTEBOOK]. */
+        const val EXTRA_NOTEBOOK_NAME = "com.nomadnotes.notebook_name"
+
+        /** Opened when no notebook name is supplied (e.g. a launcher shortcut straight to the editor). */
+        private const val DEFAULT_NOTEBOOK = "Default"
 
         /** Idle time after the last edit before the debounced autosave fires. */
-        const val AUTOSAVE_DELAY_MS = 5_000L
-
-        /** Nib width new strokes carry before the renderer applies pressure; tuned later. */
-        const val STROKE_WIDTH_BASE = 4f
-
-        /** New strokes are full black ([Stroke.grayLevel] 255); the palette is a later step. */
-        const val STROKE_GRAY_LEVEL = 255
+        private const val AUTOSAVE_DELAY_MS = 5_000L
 
         /** Eraser disc radius, in page pixels, hit-tested at each gesture point. */
-        const val ERASER_RADIUS = 20f
+        private const val ERASER_RADIUS = 20f
 
-        /** Whether this process has already shown the All-Files access prompt; set once, never reset. */
-        var allFilesAccessRequested = false
+        /** Image extensions offered as user templates from the `templates/` directory. */
+        private val TEMPLATE_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "bmp")
     }
 }

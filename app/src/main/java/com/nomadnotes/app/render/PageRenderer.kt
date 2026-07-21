@@ -13,8 +13,8 @@ import com.nomadnotes.core.Stroke
  * bitmap current as the page is edited.
  *
  * Rendering is layered for cheap incremental updates. Each layer is rasterised once into its own
- * cached bitmap; the composite is those caches blended over a white background (a stationery
- * template will blend in between the two from step 5). Because the caches survive between frames,
+ * cached bitmap; the composite is those caches blended over a white background, with the page's
+ * stationery template (if any) blended in between the two. Because the caches survive between frames,
  * finishing a single stroke costs one stroke draw plus a re-blend of a handful of bitmaps
  * ([appendStroke]) rather than re-rasterising every stroke on the page.
  *
@@ -40,9 +40,11 @@ class PageRenderer {
 
     private var compositeBitmap: Bitmap? = null
 
-    // Reserved for the step-5 stationery template: it composites above the white fill and below the
-    // ink layers (see [recomposite]). Null — and therefore skipped — until then.
-    private val templateBitmap: Bitmap? = null
+    // The stationery template composited above the white fill and below the ink layers (see
+    // [recomposite]); null means a blank white page. Supplied by each [renderFull] call and only
+    // referenced here — its bitmap is owned by the caller (a TemplateResolver), so this class never
+    // recycles it.
+    private var templateBitmap: Bitmap? = null
 
     private var width = 0
     private var height = 0
@@ -65,9 +67,14 @@ class PageRenderer {
         }
     }
 
-    /** Rebuilds every layer cache from [page] and re-blends the composite. */
-    fun renderFull(page: Page) {
+    /**
+     * Rebuilds every layer cache from [page] and re-blends the composite over [template] (the
+     * page's resolved stationery, or null for a blank white page). Call this whenever the page's
+     * strokes, layers, or template change; [appendStroke] is the one exception for a lone new stroke.
+     */
+    fun renderFull(page: Page, template: Bitmap?) {
         if (compositeBitmap == null) return
+        templateBitmap = template
         dropCachesForRemovedLayers(page)
         for (layer in page.layers) {
             val bitmap = layerBitmaps.getOrPut(layer.id) { newLayerBitmap() }
@@ -134,6 +141,8 @@ class PageRenderer {
         layerBitmaps.values.forEach { it.recycle() }
         layerBitmaps.clear()
         layers = emptyList()
+        // Only drop the reference: the template bitmap is the caller's to recycle (see the field).
+        templateBitmap = null
         compositeBitmap?.recycle()
         compositeBitmap = null
     }

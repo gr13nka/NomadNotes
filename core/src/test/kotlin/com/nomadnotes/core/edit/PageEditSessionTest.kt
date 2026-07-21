@@ -206,6 +206,30 @@ class PageEditSessionTest {
         assertFalse(session.canUndo)
     }
 
+    // --- template --------------------------------------------------------------------------
+
+    @Test
+    fun `setTemplateRef changes the ref and undo then redo returns to each state`() {
+        // Page.create() starts with no template.
+        assertEquals(null, session.page.templateRef)
+
+        session.setTemplateRef("builtin:grid")
+        assertEquals("builtin:grid", session.page.templateRef)
+
+        assertTrue(session.undo())
+        assertEquals(null, session.page.templateRef)
+
+        assertTrue(session.redo())
+        assertEquals("builtin:grid", session.page.templateRef)
+    }
+
+    @Test
+    fun `setTemplateRef to the current value is a no-op`() {
+        // The page already has a null template ref.
+        session.setTemplateRef(null)
+        assertFalse(session.canUndo)
+    }
+
     // --- undo / redo semantics -------------------------------------------------------------
 
     @Test

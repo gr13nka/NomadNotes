@@ -129,6 +129,14 @@ internal class SetLayerVisible(
     }
 }
 
+/** Sets a page's background template ref; self-inverse, capturing the prior ref. */
+internal class SetTemplateRef(
+    private val templateRef: String?,
+) : EditCommand {
+    override fun applyTo(page: Page): Applied =
+        Applied(page.copy(templateRef = templateRef), SetTemplateRef(page.templateRef))
+}
+
 /** Returns the layer with [id], or throws — the id came from the page, so absence is a bug. */
 internal fun Page.layerOrThrow(id: LayerId): Layer =
     layers.firstOrNull { it.id == id } ?: throw IllegalArgumentException("No layer $id on page ${this.id}")

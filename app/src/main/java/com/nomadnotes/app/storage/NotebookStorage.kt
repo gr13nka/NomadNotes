@@ -65,6 +65,9 @@ class NotebookStorage(private val rootDir: File) {
         File(rootDir, TEMPLATES_DIR).mkdirs()
     }
 
+    /** The directory holding user stationery images (`<root>/templates/`), shared across notebooks. */
+    val templatesDir: File get() = File(rootDir, TEMPLATES_DIR)
+
     /** Every notebook on disk, sorted by name. A `*.nnote` directory without a `notebook.json` is skipped. */
     fun listNotebooks(): List<NotebookRef> {
         val dirs = rootDir.listFiles { f -> f.isDirectory && f.name.endsWith(NOTEBOOK_SUFFIX) }
@@ -116,6 +119,18 @@ class NotebookStorage(private val rootDir: File) {
         val pagesDir = File(notebookDir(validateName(notebook.name)), PAGES_DIR)
         pagesDir.mkdirs()
         writeAtomically(File(pagesDir, "${page.id.value}.json"), NotesJson.encodePage(page))
+    }
+
+    /**
+     * Deletes one page's file from [notebook]. A no-op if the file is already gone. Callers remove
+     * the page id from `notebook.json` (and save it) first, so a failure here at worst leaves an
+     * orphan page file that nothing references — never a dangling id that would fail to load.
+     */
+    fun deletePage(notebook: Notebook, pageId: PageId) {
+        val file = pageFile(notebook, pageId)
+        if (file.exists() && !file.delete()) {
+            throw StorageException("Could not delete page file: ${file.path}")
+        }
     }
 
     /** Atomically writes [notebook]'s `notebook.json`. */
