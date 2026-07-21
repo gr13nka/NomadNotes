@@ -43,10 +43,12 @@ class OnyxPenBackend(
     private var widthBase = 0f
     private var grayLevel = MAX_GRAY_LEVEL
 
-    override var eraseMode: Boolean = false
+    override var captureMode: CaptureMode = CaptureMode.INK
         set(value) {
             field = value
-            controller?.setEraseMode(value)
+            // Wet ink only in INK mode; erase and lasso gestures show none. Routing happens in
+            // [routeDrawingGesture], which reads this field when the gesture finishes.
+            controller?.setWetInkEnabled(value == CaptureMode.INK)
         }
 
     override fun attach(surfaceView: SurfaceView, listener: PenBackend.Listener) {
@@ -54,16 +56,28 @@ class OnyxPenBackend(
         val controller = OnyxRawDrawingController(
             surfaceView = surfaceView,
             // Onyx delivers these on its input thread; the listener contract is UI-thread, so post.
-            onStrokeFinished = { points -> mainHandler.post { this.listener?.onStrokeFinished(points) } },
+            // The drawing channel is routed by captureMode on the main thread (after the post), so it
+            // reads the mode the editor last set; the erase channel is the hardware side button.
+            onDrawingGesture = { points -> mainHandler.post { routeDrawingGesture(points) } },
             onEraseGesture = { points -> mainHandler.post { this.listener?.onEraseGesture(points) } },
         )
         this.controller = controller
         controller.setStrokeAppearance(tool, widthBase, grayLevel)
-        controller.setEraseMode(eraseMode)
+        controller.setWetInkEnabled(captureMode == CaptureMode.INK)
         // Clean the surface with the committed page FIRST, then bring raw drawing up LAST.
         controller.renderToScreen(currentComposite())
         controller.openRawDrawing(Rect(0, 0, surfaceView.width, surfaceView.height), excludeRects)
         if (enabled) controller.resume()
+    }
+
+    /** Routes a finished drawing-channel gesture by the current [captureMode]. Runs on the main thread. */
+    private fun routeDrawingGesture(points: List<StrokePoint>) {
+        val listener = listener ?: return
+        when (captureMode) {
+            CaptureMode.INK -> listener.onStrokeFinished(points)
+            CaptureMode.ERASE -> listener.onEraseGesture(points)
+            CaptureMode.LASSO -> listener.onLassoGesture(points)
+        }
     }
 
     override fun setEnabled(enabled: Boolean) {

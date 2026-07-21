@@ -29,6 +29,12 @@
     <string name="action_pencil">Pencil</string>
     <string name="action_marker">Marker</string>
     <string name="action_eraser">Eraser</string>
+    <string name="action_lasso">Lasso</string>
+
+    <!-- Editor: lasso selection actions -->
+    <string name="action_copy">Copy</string>
+    <string name="action_paste">Paste</string>
+    <string name="action_deselect">Deselect</string>
 
     <!-- Editor: nib width presets -->
     <string name="width_small">S</string>

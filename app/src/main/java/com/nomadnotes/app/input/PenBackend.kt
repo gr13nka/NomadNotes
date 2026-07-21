@@ -7,6 +7,15 @@ import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
 
 /**
+ * How a pen gesture is captured, which fixes both whether in-progress ink is shown and how a
+ * finished gesture is reported:
+ *  - [INK] draws wet ink (hardware or a preview) and reports a stroke ([Listener.onStrokeFinished]).
+ *  - [ERASE] and [LASSO] both show no wet ink — the gesture is a selection, not a mark — and report
+ *    it for erasing ([Listener.onEraseGesture]) or lasso selection ([Listener.onLassoGesture]).
+ */
+enum class CaptureMode { INK, ERASE, LASSO }
+
+/**
  * The seam between the editor and whatever hardware captures pen input.
  *
  * A backend owns one [SurfaceView]'s pen input from [attach] to [detach] and reports finished
@@ -34,8 +43,12 @@ interface PenBackend {
      */
     fun setExcludeRects(rects: List<Rect>)
 
-    /** When set, a finished gesture is reported as an erase gesture rather than a drawn stroke. */
-    var eraseMode: Boolean
+    /**
+     * How the next finished gesture is captured and reported (see [CaptureMode]). In [CaptureMode.INK]
+     * the backend shows wet ink and reports a stroke; in [CaptureMode.ERASE]/[CaptureMode.LASSO] it
+     * shows none and reports the gesture for erasing or lasso selection.
+     */
+    var captureMode: CaptureMode
 
     /**
      * Sets how in-progress ink should look, so the backend's preview (a drawn one, or the panel's
@@ -75,5 +88,11 @@ interface PenBackend {
 
         /** An erasing gesture finished: its path, to be hit-tested against existing strokes. */
         fun onEraseGesture(points: List<StrokePoint>)
+
+        /**
+         * A lasso gesture finished: its full path. The editor decides what it means — a new
+         * selection polygon, or (when it started inside the current selection's box) a move.
+         */
+        fun onLassoGesture(points: List<StrokePoint>)
     }
 }

@@ -22,29 +22,32 @@ import com.onyx.android.sdk.pen.data.TouchPointList
  * Raw drawing is what makes ink lag-free: while the pen is down the e-ink hardware paints the
  * "wet" stroke itself, bypassing the view hierarchy. That wet ink is ephemeral — it is not part
  * of any bitmap and disappears on the next surface refresh — so the caller must persist finished
- * strokes on its own. This controller reports each finished stroke through [onStrokeFinished] and
- * each erase gesture through [onEraseGesture] as neutral [StrokePoint]s (never Onyx types), and
- * [renderToScreen] blits the caller's persisted bitmap back with an e-ink-appropriate update mode.
+ * strokes on its own. This controller reports every finished pen-down gesture through
+ * [onDrawingGesture], and stylus side-button erasing through [onEraseGesture], as neutral
+ * [StrokePoint]s (never Onyx types); [renderToScreen] blits the caller's persisted bitmap back with
+ * an e-ink-appropriate update mode.
  *
- * The controller also translates the editor's neutral drawing vocabulary onto the SDK, so the SDK's
+ * The controller is deliberately mechanical about the two things the SDK exposes and nothing more:
+ * whether the panel paints wet ink ([setWetInkEnabled]) and delivering the raw gestures. It does not
+ * know what a gesture *means* — with wet ink off, a pen-down gesture might be an erase or a lasso —
+ * so [onDrawingGesture] carries it up verbatim and the caller decides. Only the stylus side button,
+ * which the SDK reports on its own erasing channel, is unambiguous and surfaces as [onEraseGesture].
+ *
+ * The controller does translate the editor's neutral drawing vocabulary onto the SDK, so the SDK's
  * own constants stay hidden here: [setStrokeAppearance] maps a [Tool], nib width, and ink darkness
- * to a stroke style/width/colour; [setEraseMode] switches the pen between inking and erasing; and
- * device pressure is normalized to the 0..1 [StrokePoint] contract before a stroke leaves this class.
- *
- * Two erase paths both surface through [onEraseGesture]: the stylus side button (the SDK's own
- * erasing callbacks) and the UI eraser tool ([setEraseMode] turns wet-ink rendering off but the pen
- * keeps reporting through the drawing channel, so those "drawn" gestures are routed as erases).
+ * to a stroke style/width/colour, and device pressure is normalized to the 0..1 [StrokePoint]
+ * contract before a gesture leaves this class.
  *
  * The caller owns the lifecycle and must forward it: [openRawDrawing] once the surface and its
  * layout rectangles are known, [resume]/[pause] from the Activity's onResume/onPause, and [close]
  * from onDestroy.
  *
- * Threading: Onyx delivers raw-input callbacks on its own input thread, so [onStrokeFinished] and
+ * Threading: Onyx delivers raw-input callbacks on its own input thread, so [onDrawingGesture] and
  * [onEraseGesture] may run off the main thread; the caller marshals them as its contract requires.
  */
 class OnyxRawDrawingController(
     private val surfaceView: SurfaceView,
-    private val onStrokeFinished: (List<StrokePoint>) -> Unit,
+    private val onDrawingGesture: (List<StrokePoint>) -> Unit,
     private val onEraseGesture: (List<StrokePoint>) -> Unit = {},
 ) {
 
@@ -57,11 +60,12 @@ class OnyxRawDrawingController(
     private var strokeWidthPx: Float = DEFAULT_STROKE_WIDTH
     private var strokeColor: Int = Color.BLACK
 
-    // State mirrors: TouchHelper exposes no getters we trust, so we track open/enabled/erasing here
-    // to bracket [renderToScreen] correctly and to restore the enabled state across a region reopen.
+    // State mirrors: TouchHelper exposes no getters we trust, so we track these here to bracket
+    // [renderToScreen] correctly and to restore state across a region reopen. `wetInkEnabled` is
+    // whether the panel paints wet ink; it is off while a gesture is a selection (erase/lasso).
     private var rawDrawingOpen = false
     private var drawingEnabled = false
-    private var erasing = false
+    private var wetInkEnabled = true
 
     // Device pressure range, read once. TouchPoint.pressure is a raw device value; the StrokePoint
     // contract requires 0..1, so points are divided by this. Guarded against a nonpositive reading.
@@ -86,11 +90,10 @@ class OnyxRawDrawingController(
 
         override fun onRawDrawingTouchPointListReceived(pointList: TouchPointList?) {
             val points = pointList?.points ?: return
-            Log.i(TAG, "onRawDrawingTouchPointListReceived: ${points.size} points (erasing=$erasing)")
-            // With the UI eraser active, wet-ink rendering is off but the pen still reports through
-            // the drawing channel, so a "drawn" gesture here is really an erase; route it as one.
-            val neutral = points.toStrokePoints()
-            if (erasing) onEraseGesture(neutral) else onStrokeFinished(neutral)
+            Log.i(TAG, "onRawDrawingTouchPointListReceived: ${points.size} points (wetInk=$wetInkEnabled)")
+            // Every drawing-channel gesture goes up verbatim; the caller knows from its capture mode
+            // whether it is a stroke, an erase, or a lasso (wet ink is off for the latter two).
+            onDrawingGesture(points.toStrokePoints())
         }
 
         override fun onBeginRawErasing(shortcut: Boolean, point: TouchPoint?) {
@@ -141,7 +144,7 @@ class OnyxRawDrawingController(
             .openRawDrawing()
         touchHelper.setStrokeStyle(strokeStyle)
         touchHelper.setStrokeColor(strokeColor)
-        touchHelper.setRawDrawingRenderEnabled(!erasing)
+        touchHelper.setRawDrawingRenderEnabled(wetInkEnabled)
         // Route the stylus side button to erasing, so hardware-side erase reaches onEraseGesture.
         touchHelper.enableSideBtnErase(true)
         rawDrawingOpen = true
@@ -181,13 +184,14 @@ class OnyxRawDrawingController(
     }
 
     /**
-     * Switches the pen between inking and erasing. While [erasing] the panel paints no wet ink, but
-     * the pen keeps reporting gestures (routed to [onEraseGesture]); restoring it re-enables wet ink.
+     * Turns the panel's wet-ink rendering on or off. The caller disables it while a pen-down gesture
+     * is a selection (erase or lasso) rather than a mark, and re-enables it to ink again; the pen
+     * keeps reporting through [onDrawingGesture] either way. A no-op if unchanged.
      */
-    fun setEraseMode(erasing: Boolean) {
-        if (this.erasing == erasing) return
-        this.erasing = erasing
-        if (rawDrawingOpen) touchHelper.setRawDrawingRenderEnabled(!erasing)
+    fun setWetInkEnabled(enabled: Boolean) {
+        if (wetInkEnabled == enabled) return
+        wetInkEnabled = enabled
+        if (rawDrawingOpen) touchHelper.setRawDrawingRenderEnabled(enabled)
     }
 
     /**

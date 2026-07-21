@@ -1,5 +1,7 @@
 package com.nomadnotes.app
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Rect
 import android.os.Bundle
 import android.util.Log
@@ -40,10 +42,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.nomadnotes.R
+import com.nomadnotes.app.editor.SelectionBounds
+import com.nomadnotes.app.editor.SelectionState
 import com.nomadnotes.app.input.AndroidPenBackend
+import com.nomadnotes.app.input.CaptureMode
 import com.nomadnotes.app.input.OnyxPenBackend
 import com.nomadnotes.app.input.PenBackend
 import com.nomadnotes.app.render.PageRenderer
+import com.nomadnotes.app.render.SelectionRenderer
 import com.nomadnotes.app.render.TemplateRef
 import com.nomadnotes.app.render.TemplateResolver
 import com.nomadnotes.app.storage.NotebookStorage
@@ -67,6 +73,7 @@ import com.nomadnotes.core.Tool
 import com.nomadnotes.core.edit.PageEditSession
 import com.nomadnotes.core.geometry.Vec2
 import com.nomadnotes.core.geometry.eraserHit
+import com.nomadnotes.core.geometry.lassoSelect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -110,6 +117,7 @@ class EditorActivity : ComponentActivity() {
     private lateinit var templateResolver: TemplateResolver
 
     private val renderer = PageRenderer()
+    private val selectionRenderer = SelectionRenderer()
 
     // Chosen in onCreate: the Onyx raw-drawing backend on Boox hardware, the plain touch backend
     // everywhere else. The editor talks only to the interface and never learns which it holds.
@@ -124,6 +132,17 @@ class EditorActivity : ComponentActivity() {
     private var notebook: Notebook? = null
     private var session: PageEditSession? = null
 
+    // Lasso selection state, meaningful only while the LASSO tool is active. `selection` is the
+    // durable model (ids + layer + bounds); `selectionPolygon` is the lasso outline to decorate,
+    // shown right after a selection and dropped once it is moved or pasted. `clipboard` holds copied
+    // strokes verbatim (fresh ids are minted at paste). `decorationBitmap` is a surface-sized scratch
+    // into which the composite plus decorations are drawn before present, so layer bitmaps are never
+    // touched. All read and written on the main thread.
+    private var selection: SelectionState? = null
+    private var selectionPolygon: List<Vec2>? = null
+    private var clipboard: List<Stroke> = emptyList()
+    private var decorationBitmap: Bitmap? = null
+
     private var surfaceWidth = 0
     private var surfaceHeight = 0
     private var backendAttached = false
@@ -137,6 +156,7 @@ class EditorActivity : ComponentActivity() {
     // creates no recomposition dependency.
     private var uiTool by mutableStateOf(Tool.PEN)
     private var uiEraser by mutableStateOf(false)
+    private var uiLasso by mutableStateOf(false)
     private var uiWidth by mutableStateOf(StrokeWidth.M)
     private var uiShade by mutableStateOf(InkShade.BLACK)
     private var uiCanUndo by mutableStateOf(false)
@@ -150,6 +170,8 @@ class EditorActivity : ComponentActivity() {
     private var uiTemplateRef by mutableStateOf<String?>(null)
     private var uiTemplateFiles by mutableStateOf<List<String>>(emptyList())
     private var uiDeletePageDialog by mutableStateOf(false)
+    private var uiHasSelection by mutableStateOf(false)
+    private var uiClipboardHasContent by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -203,6 +225,8 @@ class EditorActivity : ComponentActivity() {
         backend.detach()
         renderer.release()
         templateResolver.release()
+        decorationBitmap?.recycle()
+        decorationBitmap = null
         super.onDestroy()
     }
 
@@ -242,6 +266,11 @@ class EditorActivity : ComponentActivity() {
         uiPageCount = notebook?.pageIds?.size ?: 1
         uiActiveLayer = page.mainLayerId
         uiTemplateRef = page.templateRef
+        // A selection belongs to the page it was made on; page navigation drops it (no decorations
+        // survive onto the next page's first paint).
+        selection = null
+        selectionPolygon = null
+        updateSelectionUi()
         refreshUndoRedo()
         refreshLayers()
     }
@@ -253,6 +282,9 @@ class EditorActivity : ComponentActivity() {
             surfaceWidth = width
             surfaceHeight = height
             renderer.resize(width, height)
+            // The decoration scratch is surface-sized; drop it so it is rebuilt at the new size.
+            decorationBitmap?.recycle()
+            decorationBitmap = null
             surfaceReady = true
             startEditingIfReady()
         }
@@ -280,10 +312,10 @@ class EditorActivity : ComponentActivity() {
 
     // --- rendering -------------------------------------------------------------------------
 
-    /** Rebuilds the whole composite and shows it. Use for anything but a lone new stroke. */
+    /** Rebuilds the whole composite and shows it (decorated with the selection). Use for anything but a lone new stroke. */
     private fun renderPage() {
         composePage()
-        presentComposite()
+        present()
     }
 
     /** Rebuilds the composite from the current page and template, without touching the surface. */
@@ -300,17 +332,47 @@ class EditorActivity : ComponentActivity() {
         backend.present(renderer.composite())
     }
 
+    /**
+     * Shows the current composite, decorated with the lasso outline and bounding box when a selection
+     * is active. Every path to the surface for a selection goes through here, so decorations are drawn
+     * only into a scratch copy and the page's layer bitmaps stay untouched.
+     */
+    private fun present() {
+        val selection = selection
+        if (selection == null) presentComposite() else presentDecorated(selection.bounds, selectionPolygon)
+    }
+
+    /** Composites the page plus [polygon] (if any) and the [bounds] box into the scratch bitmap, then presents it. */
+    private fun presentDecorated(bounds: SelectionBounds, polygon: List<Vec2>?) {
+        val scratch = decorationScratch()
+        if (scratch == null) {
+            presentComposite()
+            return
+        }
+        val canvas = Canvas(scratch)
+        canvas.drawBitmap(renderer.composite(), 0f, 0f, null)
+        polygon?.let { selectionRenderer.drawPolygon(canvas, it) }
+        selectionRenderer.drawBounds(canvas, bounds)
+        backend.present(scratch)
+    }
+
+    /** The surface-sized scratch bitmap for decorations, made on demand and rebuilt if the size changed. */
+    private fun decorationScratch(): Bitmap? {
+        if (surfaceWidth <= 0 || surfaceHeight <= 0) return null
+        val existing = decorationBitmap
+        if (existing != null && existing.width == surfaceWidth && existing.height == surfaceHeight) return existing
+        existing?.recycle()
+        return Bitmap.createBitmap(surfaceWidth, surfaceHeight, Bitmap.Config.ARGB_8888)
+            .also { decorationBitmap = it }
+    }
+
     // --- pen input -------------------------------------------------------------------------
 
     private val penListener = object : PenBackend.Listener {
         override fun onStrokeFinished(points: List<StrokePoint>) {
             val session = session ?: return
             if (points.isEmpty()) return
-            val page = session.page
-            // Fall back to the main layer if the active-layer selection has gone stale — e.g. a future
-            // structural op removed its layer without routing through afterModelEdit — so a finished
-            // stroke lands on a real layer instead of throwing.
-            val layerId = uiActiveLayer?.takeIf { id -> page.layers.any { it.id == id } } ?: page.mainLayerId
+            val layerId = activeLayerId(session)
             val stroke = Stroke(
                 id = StrokeId.random(),
                 tool = uiTool,
@@ -329,6 +391,8 @@ class EditorActivity : ComponentActivity() {
         }
 
         override fun onEraseGesture(points: List<StrokePoint>) = eraseAlong(points)
+
+        override fun onLassoGesture(points: List<StrokePoint>) = handleLassoGesture(points)
     }
 
     /**
@@ -337,7 +401,7 @@ class EditorActivity : ComponentActivity() {
      */
     private fun eraseAlong(points: List<StrokePoint>) {
         val session = session ?: return
-        val layerId = uiActiveLayer ?: session.page.mainLayerId
+        val layerId = activeLayerId(session)
         val layer = session.page.layers.firstOrNull { it.id == layerId }
         if (layer != null) {
             val hits = LinkedHashSet<StrokeId>()
@@ -357,18 +421,159 @@ class EditorActivity : ComponentActivity() {
         renderPage()
     }
 
+    // --- lasso selection -------------------------------------------------------------------
+
+    /**
+     * A finished LASSO-mode gesture. The backend cannot tell a lasso from a move, so the decision is
+     * made here from the current selection: a gesture that *starts inside* the selection box is a move
+     * (by the start→end delta), otherwise it is a new lasso polygon. Both backends deliver the whole
+     * gesture at pen-up, so a move commits once, at the end — there is no live drag (a deliberate UX
+     * simplification: on Onyx live drag risks latency; the touch path simply matches it).
+     */
+    private fun handleLassoGesture(points: List<StrokePoint>) {
+        if (points.isEmpty()) return
+        val selection = selection
+        val start = points.first()
+        if (selection != null && selection.bounds.contains(start.x, start.y)) {
+            val end = points.last()
+            commitMove(selection, dx = end.x - start.x, dy = end.y - start.y)
+        } else {
+            applyLasso(points.map { Vec2(it.x, it.y) })
+        }
+    }
+
+    /** Selects every active-layer stroke fully enclosed by [polygon]; an empty result clears the selection. */
+    private fun applyLasso(polygon: List<Vec2>) {
+        val session = session ?: return
+        val layerId = activeLayerId(session)
+        val layer = session.page.layers.first { it.id == layerId }
+        val ids = lassoSelect(layer.strokes, polygon).toSet()
+        if (ids.isEmpty()) {
+            selection = null
+            selectionPolygon = null
+            updateSelectionUi()
+            // Repaint to wipe the lasso preview the backend left on the surface (as the eraser does).
+            presentComposite()
+            return
+        }
+        selection = SelectionState.of(layerId, layer.strokes.filter { it.id in ids })
+        selectionPolygon = polygon
+        updateSelectionUi()
+        present()
+    }
+
+    /**
+     * Commits a move of [selection] by ([dx], [dy]) as one undoable step, then repaints with the box
+     * at its new position (the lasso outline is dropped — it no longer matches the moved strokes). A
+     * zero move just repaints, to wipe any preview the backend left.
+     */
+    private fun commitMove(selection: SelectionState, dx: Float, dy: Float) {
+        val session = session ?: return
+        if (dx == 0f && dy == 0f) {
+            present()
+            return
+        }
+        session.translateStrokes(selection.layerId, selection.strokeIds, dx, dy)
+        this.selection = selection.copy(bounds = selection.bounds.translated(dx, dy))
+        selectionPolygon = null
+        refreshUndoRedo()
+        renderPage()
+        scheduleAutosave()
+    }
+
+    /** Copies the selected strokes to the in-memory clipboard. Fresh ids are minted later, at paste. */
+    private fun copySelection() {
+        val session = session ?: return
+        val selection = selection ?: return
+        val layer = session.page.layers.firstOrNull { it.id == selection.layerId } ?: return
+        val ids = selection.strokeIds.toSet()
+        clipboard = layer.strokes.filter { it.id in ids }
+        uiClipboardHasContent = clipboard.isNotEmpty()
+    }
+
+    /**
+     * Pastes the clipboard onto the active layer, offset slightly so it does not hide the originals,
+     * and selects the result. Each pasted stroke gets a fresh id, so repeated pastes stay independent.
+     */
+    private fun pasteClipboard() {
+        val session = session ?: return
+        if (clipboard.isEmpty()) return
+        val layerId = activeLayerId(session)
+        val pasted = clipboard.map { it.offsetCopy(PASTE_OFFSET_PX, PASTE_OFFSET_PX) }
+        if (!session.pasteStrokes(layerId, pasted)) return
+        // PASTE is offered in any tool, but a selection is only interactable in LASSO mode (and a
+        // tool switch clears it), so paste enters LASSO mode — otherwise the pasted strokes would be
+        // selected yet unmovable. selectLasso first (it clears any prior selection), then adopt this one.
+        if (!uiLasso) selectLasso()
+        selection = SelectionState.of(layerId, pasted)
+        selectionPolygon = null
+        updateSelectionUi()
+        refreshUndoRedo()
+        renderPage()
+        scheduleAutosave()
+    }
+
+    /** Deletes the selected strokes as one undoable step and clears the selection. */
+    private fun deleteSelection() {
+        val session = session ?: return
+        val selection = selection ?: return
+        session.eraseStrokes(selection.layerId, selection.strokeIds)
+        this.selection = null
+        selectionPolygon = null
+        updateSelectionUi()
+        refreshUndoRedo()
+        renderPage()
+        scheduleAutosave()
+    }
+
+    /** Clears the selection and wipes its decorations. Present-wise a no-op when nothing was selected. */
+    private fun clearSelection() {
+        val had = selection != null
+        selection = null
+        selectionPolygon = null
+        updateSelectionUi()
+        if (had) presentComposite()
+    }
+
+    private fun updateSelectionUi() {
+        uiHasSelection = selection != null
+    }
+
+    /** The active layer if it is still on the page, else the main layer — so an edit never targets a gone layer. */
+    private fun activeLayerId(session: PageEditSession): LayerId =
+        uiActiveLayer?.takeIf { id -> session.page.layers.any { it.id == id } } ?: session.page.mainLayerId
+
+    /** A deep copy of the stroke with a fresh id and its points shifted by ([dx], [dy]). */
+    private fun Stroke.offsetCopy(dx: Float, dy: Float): Stroke =
+        copy(id = StrokeId.random(), points = points.map { it.copy(x = it.x + dx, y = it.y + dy) })
+
     // --- toolbar actions -------------------------------------------------------------------
 
     private fun selectTool(tool: Tool) {
+        if (uiTool == tool && !uiEraser && !uiLasso) return
         uiTool = tool
         uiEraser = false
-        backend.eraseMode = false
+        uiLasso = false
+        clearSelection()
+        backend.captureMode = CaptureMode.INK
         pushStrokeAppearance()
     }
 
     private fun selectEraser() {
+        if (uiEraser) return
         uiEraser = true
-        backend.eraseMode = true
+        uiLasso = false
+        clearSelection()
+        backend.captureMode = CaptureMode.ERASE
+    }
+
+    /** Enters lasso mode: a lasso encloses strokes into a selection to move, copy, or delete. */
+    private fun selectLasso() {
+        if (uiLasso) return
+        uiLasso = true
+        uiEraser = false
+        clearSelection()
+        backend.captureMode = CaptureMode.LASSO
     }
 
     private fun setWidth(width: StrokeWidth) {
@@ -407,6 +612,11 @@ class EditorActivity : ComponentActivity() {
             uiActiveLayer = session.page.mainLayerId
         }
         uiTemplateRef = session.page.templateRef
+        // A structural edit (undo/redo, layer/template change) can invalidate the selection's ids or
+        // bounds, so drop it; renderPage then repaints without decorations.
+        selection = null
+        selectionPolygon = null
+        updateSelectionUi()
         refreshUndoRedo()
         refreshLayers()
         renderPage()
@@ -655,6 +865,20 @@ class EditorActivity : ComponentActivity() {
                 EinkToggle(stringResource(R.string.action_pencil), selected = !uiEraser && uiTool == Tool.PENCIL) { selectTool(Tool.PENCIL) }
                 EinkToggle(stringResource(R.string.action_marker), selected = !uiEraser && uiTool == Tool.MARKER) { selectTool(Tool.MARKER) }
                 EinkToggle(stringResource(R.string.action_eraser), selected = uiEraser) { selectEraser() }
+                EinkToggle(stringResource(R.string.action_lasso), selected = uiLasso) { selectLasso() }
+                // The selection action bar lives in the toolbar so its buttons sit in the already-excluded
+                // strip (no dynamic raw-drawing exclude rect) and appearing does not resize the canvas.
+                if (uiHasSelection || uiClipboardHasContent) {
+                    ToolbarDivider()
+                    if (uiHasSelection) {
+                        EinkButton(stringResource(R.string.action_copy)) { copySelection() }
+                        EinkButton(stringResource(R.string.action_delete)) { deleteSelection() }
+                        EinkButton(stringResource(R.string.action_deselect)) { clearSelection() }
+                    }
+                    if (uiClipboardHasContent) {
+                        EinkButton(stringResource(R.string.action_paste)) { pasteClipboard() }
+                    }
+                }
                 ToolbarDivider()
 
                 EinkToggle(stringResource(R.string.width_small), selected = uiWidth == StrokeWidth.S) { setWidth(StrokeWidth.S) }
@@ -803,6 +1027,9 @@ class EditorActivity : ComponentActivity() {
 
         /** Eraser disc radius, in page pixels, hit-tested at each gesture point. */
         private const val ERASER_RADIUS = 20f
+
+        /** How far a paste is offset from the copied strokes, in page pixels, so it does not hide them. */
+        private const val PASTE_OFFSET_PX = 24f
 
         /** Image extensions offered as user templates from the `templates/` directory. */
         private val TEMPLATE_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "bmp")

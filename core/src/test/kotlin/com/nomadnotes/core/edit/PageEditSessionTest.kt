@@ -8,6 +8,7 @@ import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -58,6 +59,44 @@ class PageEditSessionTest {
 
         assertTrue(session.redo())
         assertEquals(after, session.page)
+    }
+
+    // --- pasteStrokes ----------------------------------------------------------------------
+
+    @Test
+    fun `pasteStrokes appends the strokes and undo restores their absence, redo re-adds them`() {
+        session.addStroke(mainLayer, stroke("existing"))
+
+        assertTrue(session.pasteStrokes(mainLayer, listOf(stroke("p1"), stroke("p2"))))
+        assertEquals(listOf(StrokeId("existing"), StrokeId("p1"), StrokeId("p2")), mainStrokeIds())
+
+        // One undo removes exactly the pasted strokes, leaving what was there before.
+        assertTrue(session.undo())
+        assertEquals(listOf(StrokeId("existing")), mainStrokeIds())
+
+        assertTrue(session.redo())
+        assertEquals(listOf(StrokeId("existing"), StrokeId("p1"), StrokeId("p2")), mainStrokeIds())
+    }
+
+    @Test
+    fun `pasteStrokes into a missing layer throws, consistent with addStroke`() {
+        val missing = LayerId("nope")
+        assertThrows(IllegalArgumentException::class.java) { session.addStroke(missing, stroke("a")) }
+        assertThrows(IllegalArgumentException::class.java) {
+            session.pasteStrokes(missing, listOf(stroke("b")))
+        }
+    }
+
+    @Test
+    fun `pasteStrokes of an empty list is a no-op that leaves history untouched`() {
+        session.addStroke(mainLayer, stroke("a"))
+        session.undo()
+        assertTrue(session.canRedo)
+
+        assertFalse(session.pasteStrokes(mainLayer, emptyList()))
+
+        assertFalse(session.canUndo)
+        assertTrue("a no-op must not clear the redo stack", session.canRedo)
     }
 
     // --- eraseStrokes ----------------------------------------------------------------------

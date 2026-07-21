@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
@@ -21,8 +22,8 @@ import com.nomadnotes.core.Tool
  * in-progress gesture itself: on every move it re-blits the current committed page under a live
  * preview of the points collected so far. That is cheap enough for a normal display and would be
  * wrong on e-ink (which is why the Onyx path never does it). When the gesture ends the whole point
- * list is handed to the listener — as a drawn stroke, or, when [eraseMode] is set, as an erase
- * gesture — and the editor repaints the committed result over this preview.
+ * list is handed to the listener — as a drawn stroke, an erase gesture, or a lasso gesture per the
+ * current [captureMode] — and the editor repaints the committed result over this preview.
  *
  * Main-thread only: touch events arrive there and nothing here is synchronized.
  *
@@ -33,7 +34,7 @@ class AndroidPenBackend(
     private val currentComposite: () -> Bitmap,
 ) : PenBackend {
 
-    override var eraseMode: Boolean = false
+    override var captureMode: CaptureMode = CaptureMode.INK
 
     // Plain touch has no hardware wet ink, so this backend must draw and present every change itself.
     override val rendersWetInkNatively: Boolean = false
@@ -50,6 +51,9 @@ class AndroidPenBackend(
     // Rebuilt by [setStrokeAppearance] so the live preview approximates the committed stroke.
     private var inkPreviewPaint = strokePaint(Color.BLACK, INK_PREVIEW_WIDTH)
     private val erasePreviewPaint = strokePaint(ERASE_PREVIEW_COLOR, ERASE_PREVIEW_WIDTH)
+    private val lassoPreviewPaint = strokePaint(LASSO_PREVIEW_COLOR, LASSO_PREVIEW_WIDTH).apply {
+        pathEffect = DashPathEffect(floatArrayOf(LASSO_DASH_ON, LASSO_DASH_OFF), 0f)
+    }
     private val previewPath = Path()
 
     @SuppressLint("ClickableViewAccessibility")
@@ -133,9 +137,14 @@ class AndroidPenBackend(
     private fun finishGesture() {
         val gesture = ArrayList(points)
         resetGesture()
-        // The editor repaints the committed page (the new stroke, or the page with strokes erased)
-        // right after this callback, which overwrites the preview left on the surface.
-        listener?.let { if (eraseMode) it.onEraseGesture(gesture) else it.onStrokeFinished(gesture) }
+        // The editor repaints the committed page (the new stroke, the page with strokes erased, or
+        // the selection decorations) right after this callback, overwriting the preview on the surface.
+        val listener = listener ?: return
+        when (captureMode) {
+            CaptureMode.INK -> listener.onStrokeFinished(gesture)
+            CaptureMode.ERASE -> listener.onEraseGesture(gesture)
+            CaptureMode.LASSO -> listener.onLassoGesture(gesture)
+        }
     }
 
     private fun blitPreview() {
@@ -165,7 +174,11 @@ class AndroidPenBackend(
 
     private fun drawPreview(canvas: Canvas) {
         if (points.isEmpty()) return
-        val paint = if (eraseMode) erasePreviewPaint else inkPreviewPaint
+        val paint = when (captureMode) {
+            CaptureMode.INK -> inkPreviewPaint
+            CaptureMode.ERASE -> erasePreviewPaint
+            CaptureMode.LASSO -> lassoPreviewPaint
+        }
         if (points.size == 1) {
             canvas.drawPoint(points[0].x, points[0].y, paint)
             return
@@ -215,5 +228,15 @@ class AndroidPenBackend(
         /** The eraser preview hints its path and rough reach without looking like drawn ink. */
         const val ERASE_PREVIEW_WIDTH = 12f
         const val ERASE_PREVIEW_COLOR = 0x66808080 // translucent gray
+
+        /**
+         * The lasso preview is a thin dashed line, distinct from ink and eraser. This backend cannot
+         * tell a lasso from a move (both arrive in LASSO mode), so a move-drag traces this dashed line
+         * too; that is a dev-path cosmetic quirk only — the committed result is still a move.
+         */
+        const val LASSO_PREVIEW_WIDTH = 2f
+        const val LASSO_PREVIEW_COLOR = 0xCC000000.toInt() // near-opaque black
+        const val LASSO_DASH_ON = 12f
+        const val LASSO_DASH_OFF = 8f
     }
 }
