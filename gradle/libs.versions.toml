@@ -19,8 +19,8 @@ onyxsdkPen = "1.5.4.1"
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
 
-# Compose is staged for later steps (the spike screen itself uses plain Views, no Compose).
-# These are dependency declarations only; the Compose build feature is not enabled yet.
+# Compose drives the notebook-list and editor-chrome UI (:app's buildFeatures.compose). The BOM
+# pins the version of every Compose artifact below, so those declarations carry no version.
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
 compose-ui = { module = "androidx.compose.ui:ui" }
 compose-ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
@@ -44,6 +44,6 @@ android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
-# Staged for later steps that introduce Compose UI.
+# Supplies the Compose compiler for :app; its version must track the Kotlin version.
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

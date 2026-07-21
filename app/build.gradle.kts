@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
 }
 
 android {
@@ -18,6 +19,12 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        // The editor and notebook-list UI are Jetpack Compose. The Compose compiler is supplied by
+        // the kotlin-compose Gradle plugin above (matched to the Kotlin version in the catalog).
+        compose = true
     }
 
     packaging {
@@ -47,10 +54,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.lifecycle.runtime.ktx)
 
-    // Compose is staged for later steps only. The spike Activity uses plain Views, so the
-    // Compose build feature (and its compiler) is intentionally NOT enabled yet — that keeps
-    // this build's memory footprint low. These declarations just put the libraries on the
-    // classpath for the UI work in later steps.
+    // Jetpack Compose drives the notebook-list and editor-chrome UI. The BOM pins every Compose
+    // artifact's version; the compiler is enabled via buildFeatures.compose above.
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)
