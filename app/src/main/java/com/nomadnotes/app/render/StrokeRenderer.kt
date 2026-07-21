@@ -92,25 +92,32 @@ class StrokeRenderer {
     private fun normalizedPressure(pressure: Float): Float = pressure.coerceIn(0f, 1f)
 
     /**
-     * grayLevel is ink *darkness* per the model ([Stroke.grayLevel]: 0 = white, 255 = black), so it
-     * maps to a gray whose channel value is its complement.
+     * The single source of truth for how a stroke's tool and darkness become ink appearance. The
+     * touch backend's live preview reads [MARKER_WIDTH_MULTIPLIER], [MARKER_ALPHA] and
+     * [grayLevelToColor] from here so its wet ink matches the committed stroke this renderer draws;
+     * the members it does not need stay private. (:pen-onyx keeps its own copy of the mapping — it
+     * cannot depend on :app — which is the one boundary-justified duplication.)
      */
-    private fun grayLevelToColor(grayLevel: Int): Int {
-        val channel = 255 - grayLevel.coerceIn(0, 255)
-        return Color.rgb(channel, channel, channel)
-    }
-
-    private companion object {
+    internal companion object {
         /** Nib width at zero pressure, as a fraction of the stroke's base width. */
-        const val MIN_WIDTH_FACTOR = 0.35f
+        private const val MIN_WIDTH_FACTOR = 0.35f
 
         /** Extra nib width added at full pressure, as a fraction of the stroke's base width. */
-        const val PRESSURE_WIDTH_FACTOR = 0.65f
+        private const val PRESSURE_WIDTH_FACTOR = 0.65f
 
         /** The marker lays down a broad nib: this multiple of the stroke's base width. */
         const val MARKER_WIDTH_MULTIPLIER = 2.5f
 
         /** The marker is translucent so overlaps read as highlighter ink, not solid fill. */
         const val MARKER_ALPHA = 128
+
+        /**
+         * grayLevel is ink *darkness* per the model ([Stroke.grayLevel]: 0 = white, 255 = black),
+         * so it maps to an opaque gray whose channel value is its complement.
+         */
+        fun grayLevelToColor(grayLevel: Int): Int {
+            val channel = 255 - grayLevel.coerceIn(0, 255)
+            return Color.rgb(channel, channel, channel)
+        }
     }
 }

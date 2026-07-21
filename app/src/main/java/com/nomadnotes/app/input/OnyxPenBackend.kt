@@ -92,6 +92,9 @@ class OnyxPenBackend(
         controller?.close()
         controller = null
         listener = null
+        // Drop any gesture callbacks still queued for the main thread, so a late post cannot reach a
+        // now-detached listener after teardown.
+        mainHandler.removeCallbacksAndMessages(null)
     }
 
     companion object {

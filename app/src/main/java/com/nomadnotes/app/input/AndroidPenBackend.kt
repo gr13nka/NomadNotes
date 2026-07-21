@@ -9,6 +9,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.view.MotionEvent
 import android.view.SurfaceView
+import com.nomadnotes.app.render.StrokeRenderer
 import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
 
@@ -70,11 +71,10 @@ class AndroidPenBackend(
     }
 
     override fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int) {
-        val channel = 255 - grayLevel.coerceIn(0, 255)
-        val color = Color.rgb(channel, channel, channel)
-        val width = if (tool == Tool.MARKER) widthBase * MARKER_PREVIEW_MULTIPLIER else widthBase
+        val color = StrokeRenderer.grayLevelToColor(grayLevel)
+        val width = if (tool == Tool.MARKER) widthBase * StrokeRenderer.MARKER_WIDTH_MULTIPLIER else widthBase
         inkPreviewPaint = strokePaint(color, width).apply {
-            if (tool == Tool.MARKER) alpha = MARKER_PREVIEW_ALPHA
+            if (tool == Tool.MARKER) alpha = StrokeRenderer.MARKER_ALPHA
         }
     }
 
@@ -211,10 +211,6 @@ class AndroidPenBackend(
     private companion object {
         /** The preview width before [setStrokeAppearance] runs; the finished stroke replaces it with real ink. */
         const val INK_PREVIEW_WIDTH = 3f
-
-        /** The marker preview widens and dims to hint the broad, translucent nib (mirrors StrokeRenderer). */
-        const val MARKER_PREVIEW_MULTIPLIER = 2.5f
-        const val MARKER_PREVIEW_ALPHA = 128
 
         /** The eraser preview hints its path and rough reach without looking like drawn ink. */
         const val ERASE_PREVIEW_WIDTH = 12f
