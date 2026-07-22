@@ -79,12 +79,11 @@ interface PenBackend {
     fun present(composite: Bitmap, cleanRefresh: Boolean = false)
 
     /**
-     * Blits [composite] *during* an in-progress [CaptureMode.LASSO] gesture, for the editor's live
-     * move/draw preview. Unlike [present], a raw-drawing backend must NOT bracket this with a
-     * raw-drawing disable/enable — that would abort the in-flight capture. Doing so is safe only
-     * because wet ink is off throughout a lasso gesture, so there is no hardware stroke render for
-     * the blit to corrupt. Call only while a lasso gesture is being captured; a backend with no
-     * hardware ink blits exactly as [present] does.
+     * Blits [composite] to the surface for the editor's live [CaptureMode.LASSO] preview (a move
+     * drag, or a draw outline), as the gesture is captured. A raw-drawing backend captures a lasso
+     * with raw drawing turned off, so this is an ordinary repaint with no in-flight hardware stroke to
+     * disturb — kept distinct from [present] only to name the preview path. A plain backend blits
+     * exactly as [present] does. Call only while a lasso gesture is being captured.
      */
     fun presentDuringCapture(composite: Bitmap)
 

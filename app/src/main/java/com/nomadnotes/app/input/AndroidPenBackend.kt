@@ -7,23 +7,23 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
-import android.view.MotionEvent
 import android.view.SurfaceView
 import com.nomadnotes.app.render.StrokeRenderer
 import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
 
 /**
- * A [PenBackend] built on ordinary [MotionEvent] touch input, for the emulator and non-Onyx
- * tablets (and, for now, the editor on Onyx hardware too, until raw drawing is wired in).
+ * A [PenBackend] built on ordinary touch input, for the emulator and non-Onyx tablets.
  *
  * Unlike the e-ink panel, plain touch has no hardware "wet ink", so this backend paints the
- * in-progress gesture itself: on every move it re-blits the current committed page under a live
+ * in-progress gesture itself: on every sample it re-blits the current committed page under a live
  * preview of the points collected so far. That is cheap enough for a normal display and would be
- * wrong on e-ink (which is why the Onyx path never does it). When the gesture ends the whole point
- * list is handed to the listener — as a drawn stroke, an erase gesture, or a lasso gesture per the
- * current [captureMode] — and the editor repaints the committed result over this preview.
+ * wrong on e-ink (which is why the Onyx path never inks this way). When the gesture ends the whole
+ * point list is handed to the listener — as a drawn stroke, an erase gesture, or a lasso gesture per
+ * the current [captureMode] — and the editor repaints the committed result over this preview.
  *
+ * The touch grammar (start/append/finish/cancel, point building) is delegated to a shared
+ * [GestureCollector]; this backend only decides what to draw and how to route the finished gesture.
  * Main-thread only: touch events arrive there and nothing here is synchronized.
  *
  * @param currentComposite supplies the page bitmap to show beneath the live preview — the editor's
@@ -41,33 +41,36 @@ class AndroidPenBackend(
     private var surfaceView: SurfaceView? = null
     private var listener: PenBackend.Listener? = null
     private var enabled: Boolean = true
-    private var excludeRects: List<Rect> = emptyList()
-
-    private val points = ArrayList<StrokePoint>()
-    private var gestureStart = 0L
-    private var capturing = false
 
     // Rebuilt by [setStrokeAppearance] so the live preview approximates the committed stroke.
     private var inkPreviewPaint = strokePaint(Color.BLACK, INK_PREVIEW_WIDTH)
     private val erasePreviewPaint = strokePaint(ERASE_PREVIEW_COLOR, ERASE_PREVIEW_WIDTH)
     private val previewPath = Path()
 
+    // Any pointer is a drawing tool here (the emulator and plain tablets use touch, not a stylus).
+    private val collector = GestureCollector(
+        stylusOnly = false,
+        onSample = { points -> onGestureSample(points) },
+        onFinished = { points -> onGestureFinished(points) },
+        onCancelled = { onGestureCancelled() },
+    )
+
     @SuppressLint("ClickableViewAccessibility")
     override fun attach(surfaceView: SurfaceView, listener: PenBackend.Listener) {
         this.surfaceView = surfaceView
         this.listener = listener
-        surfaceView.setOnTouchListener { _, event -> onTouch(event) }
+        surfaceView.setOnTouchListener { _, event -> enabled && collector.onTouch(event) }
         // Bring the surface up to the committed page as the first thing the user sees.
         present(currentComposite(), cleanRefresh = false)
     }
 
     override fun setEnabled(enabled: Boolean) {
         this.enabled = enabled
-        if (!enabled) resetGesture()
+        if (!enabled) collector.reset()
     }
 
     override fun setExcludeRects(rects: List<Rect>) {
-        excludeRects = rects.toList()
+        collector.setExcludeRects(rects)
     }
 
     override fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int) {
@@ -94,74 +97,41 @@ class AndroidPenBackend(
         surfaceView?.setOnTouchListener(null)
         surfaceView = null
         listener = null
-        resetGesture()
+        collector.reset()
     }
 
-    private fun onTouch(event: MotionEvent): Boolean {
-        if (!enabled) return false
-        return when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                if (isExcluded(event.x, event.y)) return false
-                capturing = true
-                gestureStart = event.eventTime
-                points.clear()
-                points.add(currentPointOf(event))
-                // In LASSO mode the editor owns the preview (from onLassoMove), so this backend draws
-                // none — not even the first frame. INK/ERASE still get a live self-drawn preview.
-                if (captureMode != CaptureMode.LASSO) blitPreview()
-                true
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (!capturing) return false
-                // A MOVE batches the samples between it and the previous event; replay them in
-                // order so fast strokes keep their shape.
-                for (i in 0 until event.historySize) points.add(historicalPointOf(event, i))
-                points.add(currentPointOf(event))
-                if (captureMode == CaptureMode.LASSO) {
-                    // The editor renders the lasso preview (a move drag, or the outline) from these
-                    // live samples; forward the latest one and draw nothing here.
-                    listener?.onLassoMove(points.last())
-                } else {
-                    blitPreview()
-                }
-                true
-            }
-            MotionEvent.ACTION_UP -> {
-                if (!capturing) return false
-                points.add(currentPointOf(event))
-                finishGesture()
-                true
-            }
-            MotionEvent.ACTION_CANCEL -> {
-                if (!capturing) return false
-                val wasLasso = captureMode == CaptureMode.LASSO
-                resetGesture()
-                // A cancelled lasso: tell the editor with an empty gesture so it drops its live
-                // preview and restores the page. Other modes just wipe their self-drawn preview.
-                if (wasLasso) listener?.onLassoGesture(emptyList()) else blitComposite()
-                true
-            }
-            else -> false
+    /** A pen-down or move sample: draw the live preview, or (in LASSO) hand it to the editor's preview. */
+    private fun onGestureSample(points: List<StrokePoint>) {
+        if (captureMode == CaptureMode.LASSO) {
+            // The editor renders the lasso preview (a move drag, or the outline) from these live
+            // samples; forward the latest one and draw nothing here.
+            listener?.onLassoMove(points.last())
+        } else {
+            blitPreview(points)
         }
     }
 
-    private fun finishGesture() {
-        val gesture = ArrayList(points)
-        resetGesture()
+    private fun onGestureFinished(points: List<StrokePoint>) {
         // The editor repaints the committed page (the new stroke, the page with strokes erased, or
         // the selection decorations) right after this callback, overwriting the preview on the surface.
         val listener = listener ?: return
         when (captureMode) {
-            CaptureMode.INK -> listener.onStrokeFinished(gesture)
-            CaptureMode.ERASE -> listener.onEraseGesture(gesture)
-            CaptureMode.LASSO -> listener.onLassoGesture(gesture)
+            CaptureMode.INK -> listener.onStrokeFinished(points)
+            CaptureMode.ERASE -> listener.onEraseGesture(points)
+            CaptureMode.LASSO -> listener.onLassoGesture(points)
         }
     }
 
-    private fun blitPreview() {
+    private fun onGestureCancelled() {
+        // A cancelled lasso: tell the editor with an empty gesture so it drops its live preview and
+        // restores the page. Other modes just wipe their self-drawn preview.
+        if (captureMode == CaptureMode.LASSO) listener?.onLassoGesture(emptyList()) else blitComposite()
+    }
+
+    private fun blitPreview(points: List<StrokePoint>) {
         lockedSurface { canvas ->
             drawComposite(canvas)
-            drawPreview(canvas)
+            drawPreview(canvas, points)
         }
     }
 
@@ -183,13 +153,13 @@ class AndroidPenBackend(
         canvas.drawBitmap(currentComposite(), 0f, 0f, null)
     }
 
-    private fun drawPreview(canvas: Canvas) {
+    private fun drawPreview(canvas: Canvas, points: List<StrokePoint>) {
         if (points.isEmpty()) return
         val paint = when (captureMode) {
             CaptureMode.INK -> inkPreviewPaint
             CaptureMode.ERASE -> erasePreviewPaint
-            // The editor renders the lasso preview itself (from onLassoMove), so this backend never
-            // reaches here in LASSO mode — blitPreview is skipped for it. Guard defensively.
+            // The editor renders the lasso preview itself (from onLassoMove), so blitPreview is never
+            // called in LASSO mode. Guard defensively.
             CaptureMode.LASSO -> return
         }
         if (points.size == 1) {
@@ -201,29 +171,6 @@ class AndroidPenBackend(
         for (i in 1 until points.size) previewPath.lineTo(points[i].x, points[i].y)
         canvas.drawPath(previewPath, paint)
     }
-
-    private fun resetGesture() {
-        capturing = false
-        points.clear()
-        previewPath.reset()
-    }
-
-    private fun isExcluded(x: Float, y: Float): Boolean =
-        excludeRects.any { it.contains(x.toInt(), y.toInt()) }
-
-    private fun currentPointOf(event: MotionEvent) = StrokePoint(
-        x = event.x,
-        y = event.y,
-        pressure = event.pressure,
-        timestampDelta = event.eventTime - gestureStart,
-    )
-
-    private fun historicalPointOf(event: MotionEvent, index: Int) = StrokePoint(
-        x = event.getHistoricalX(index),
-        y = event.getHistoricalY(index),
-        pressure = event.getHistoricalPressure(index),
-        timestampDelta = event.getHistoricalEventTime(index) - gestureStart,
-    )
 
     private fun strokePaint(color: Int, width: Float) = Paint().apply {
         isAntiAlias = true
