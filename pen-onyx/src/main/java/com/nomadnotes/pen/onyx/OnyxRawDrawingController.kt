@@ -216,10 +216,12 @@ class OnyxRawDrawingController(
      * Blits [bitmap] onto the surface. Used to show persisted strokes (and to clear), since raw
      * drawing's wet ink is not retained.
      *
-     * The default waveform is the fast handwriting-repaint mode, tuned for adding dark ink. When
-     * [clean] is set the blit instead uses [ERASE_CLEAN_UPDATE_MODE], an anti-ghost waveform for a
-     * repaint that *removes* ink: the fast additive mode leaves the erased strokes faintly ghosted
-     * (a visible "blink") until a later full refresh, which the cleaner mode avoids.
+     * When [clean] is set (a repaint that *removes* ink, i.e. erasing) the panel is then forced
+     * through a full-panel [ERASE_CLEAN_UPDATE_MODE] refresh. The surface post below runs a fast
+     * waveform that leaves the erased strokes ghosted (a visible "blink"); crucially,
+     * [EpdController.setViewDefaultUpdateMode] governs only the view's ordinary draw path, NOT a
+     * manual lockCanvas/unlockCanvasAndPost, so the waveform must be forced explicitly with
+     * [EpdController.refreshScreen] after the post.
      *
      * A lockCanvas/unlockCanvasAndPost corrupts TouchHelper's rendering only while raw drawing is
      * actively rendering, so the blit is bracketed by disable/enable exactly then; when raw drawing
@@ -232,15 +234,23 @@ class OnyxRawDrawingController(
         val bracket = rawDrawingOpen && drawingEnabled
         if (bracket) touchHelper.setRawDrawingEnabled(false)
         try {
-            val mode = if (clean) ERASE_CLEAN_UPDATE_MODE else UpdateMode.HAND_WRITING_REPAINT_MODE
-            EpdController.setViewDefaultUpdateMode(surfaceView, mode)
-            val canvas = surfaceView.holder.lockCanvas() ?: return
-            try {
-                canvas.drawColor(Color.WHITE)
-                canvas.drawBitmap(bitmap, 0f, 0f, null)
-            } finally {
-                surfaceView.holder.unlockCanvasAndPost(canvas)
+            EpdController.setViewDefaultUpdateMode(surfaceView, UpdateMode.HAND_WRITING_REPAINT_MODE)
+            val canvas = surfaceView.holder.lockCanvas()
+            if (canvas != null) {
+                try {
+                    canvas.drawColor(Color.WHITE)
+                    canvas.drawBitmap(bitmap, 0f, 0f, null)
+                } finally {
+                    surfaceView.holder.unlockCanvasAndPost(canvas)
+                }
             }
+            // TODO(erase-flash): this clears the whole panel, so every erase flashes heavily. To
+            // confine the flash, refresh only the erased strokes' bounding box with
+            // EpdController.refreshScreenRegion(surfaceView, l, t, r, b, mode) — that Rect would have
+            // to be threaded down from the editor's erase gesture (renderPage/present carry it). A
+            // lighter waveform (GC4) or a full clear only every Nth erase are cheaper alternatives
+            // that trade a little ghosting for less flash.
+            if (clean) EpdController.refreshScreen(surfaceView, ERASE_CLEAN_UPDATE_MODE)
         } finally {
             EpdController.resetViewUpdateMode(surfaceView)
             if (bracket) touchHelper.setRawDrawingEnabled(true)
