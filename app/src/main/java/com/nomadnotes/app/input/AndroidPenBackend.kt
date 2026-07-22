@@ -62,7 +62,7 @@ class AndroidPenBackend(
         this.listener = listener
         surfaceView.setOnTouchListener { _, event -> onTouch(event) }
         // Bring the surface up to the committed page as the first thing the user sees.
-        present(currentComposite())
+        present(currentComposite(), cleanRefresh = false)
     }
 
     override fun setEnabled(enabled: Boolean) {
@@ -82,7 +82,8 @@ class AndroidPenBackend(
         }
     }
 
-    override fun present(composite: Bitmap) {
+    override fun present(composite: Bitmap, cleanRefresh: Boolean) {
+        // Plain touch has no e-ink ghosting, so a clean refresh looks no different here; ignore it.
         lockedSurface { canvas ->
             canvas.drawColor(Color.WHITE)
             canvas.drawBitmap(composite, 0f, 0f, null)

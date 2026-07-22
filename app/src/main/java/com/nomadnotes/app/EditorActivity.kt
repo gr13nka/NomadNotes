@@ -11,11 +11,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -320,10 +321,14 @@ class EditorActivity : ComponentActivity() {
 
     // --- rendering -------------------------------------------------------------------------
 
-    /** Rebuilds the whole composite and shows it (decorated with the selection). Use for anything but a lone new stroke. */
-    private fun renderPage() {
+    /**
+     * Rebuilds the whole composite and shows it (decorated with the selection). Use for anything but a
+     * lone new stroke. [cleanRefresh] requests a ghost-free e-ink repaint (see [PenBackend.present]),
+     * for a repaint that removes ink such as erasing.
+     */
+    private fun renderPage(cleanRefresh: Boolean = false) {
         composePage()
-        present()
+        present(cleanRefresh)
     }
 
     /** Rebuilds the composite from the current page and template, without touching the surface. */
@@ -335,9 +340,9 @@ class EditorActivity : ComponentActivity() {
     }
 
     /** Shows the current composite on the surface (the backend brackets the blit if its hardware needs it). */
-    private fun presentComposite() {
+    private fun presentComposite(cleanRefresh: Boolean = false) {
         if (surfaceWidth <= 0 || surfaceHeight <= 0) return
-        backend.present(renderer.composite())
+        backend.present(renderer.composite(), cleanRefresh)
     }
 
     /**
@@ -345,23 +350,24 @@ class EditorActivity : ComponentActivity() {
      * is active. Every path to the surface for a selection goes through here, so decorations are drawn
      * only into a scratch copy and the page's layer bitmaps stay untouched.
      */
-    private fun present() {
+    private fun present(cleanRefresh: Boolean = false) {
         val selection = selection
-        if (selection == null) presentComposite() else presentDecorated(selection.bounds, selectionPolygon)
+        if (selection == null) presentComposite(cleanRefresh)
+        else presentDecorated(selection.bounds, selectionPolygon, cleanRefresh)
     }
 
     /** Composites the page plus [polygon] (if any) and the [bounds] box into the scratch bitmap, then presents it. */
-    private fun presentDecorated(bounds: SelectionBounds, polygon: List<Vec2>?) {
+    private fun presentDecorated(bounds: SelectionBounds, polygon: List<Vec2>?, cleanRefresh: Boolean = false) {
         val scratch = decorationScratch()
         if (scratch == null) {
-            presentComposite()
+            presentComposite(cleanRefresh)
             return
         }
         val canvas = Canvas(scratch)
         canvas.drawBitmap(renderer.composite(), 0f, 0f, null)
         polygon?.let { selectionRenderer.drawPolygon(canvas, it) }
         selectionRenderer.drawBounds(canvas, bounds)
-        backend.present(scratch)
+        backend.present(scratch, cleanRefresh)
     }
 
     /** The surface-sized scratch bitmap for decorations, made on demand and rebuilt if the size changed. */
@@ -425,8 +431,10 @@ class EditorActivity : ComponentActivity() {
                 scheduleAutosave()
             }
         }
-        // Repaint regardless, to wipe the eraser preview the backend left on the surface.
-        renderPage()
+        // Repaint regardless, to wipe the eraser preview the backend left on the surface. Ask for a
+        // clean refresh: this repaint removes ink, which the fast additive e-ink mode would leave
+        // ghosted (the erased strokes "blink" back until a later full refresh).
+        renderPage(cleanRefresh = true)
     }
 
     // --- lasso selection -------------------------------------------------------------------
@@ -882,6 +890,7 @@ class EditorActivity : ComponentActivity() {
         AndroidView(factory = { surfaceView }, modifier = Modifier.fillMaxSize())
     }
 
+    @OptIn(ExperimentalLayoutApi::class) // FlowRow / FlowRowScope.align are still marked experimental.
     @Composable
     private fun EditorToolbar() {
         Column(
@@ -890,13 +899,17 @@ class EditorActivity : ComponentActivity() {
                 .background(EinkWhite)
                 .onGloballyPositioned { updateToolbarExclude(it.boundsInWindow()) },
         ) {
-            Row(
+            // A wrapping FlowRow rather than a horizontally scrolling Row: every control stays on
+            // screen (spilling onto a second line when the width runs out) and there is no scroll
+            // gesture — the toolbar scroll lagged badly after a stroke, since raw drawing suppresses
+            // the fling's window repaints. The toolbar grows taller when it wraps; the exclude rect is
+            // measured from these bounds, so it grows with it, and the full-bleed canvas sits behind.
+            FlowRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
                     .padding(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 // Every chrome mutation is wrapped in withChromeRefresh: raw drawing suppresses normal
                 // window rendering on Onyx, so without the brief capture pause the toolbar repaint (tool
@@ -945,6 +958,7 @@ class EditorActivity : ComponentActivity() {
                     stringResource(R.string.page_position, uiPageIndex + 1, uiPageCount),
                     color = EinkBlack,
                     fontSize = 15.sp,
+                    modifier = Modifier.align(Alignment.CenterVertically),
                 )
                 EinkButton(stringResource(R.string.nav_next), enabled = uiPageIndex < uiPageCount - 1) { withChromeRefresh { goToPage(uiPageIndex + 1) } }
                 EinkButton(stringResource(R.string.action_insert_page)) { withChromeRefresh { insertPageAfterCurrent() } }

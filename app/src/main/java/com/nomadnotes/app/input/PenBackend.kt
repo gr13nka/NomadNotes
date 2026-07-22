@@ -71,8 +71,12 @@ interface PenBackend {
      * erase, layer/template/page change, first paint). A raw-drawing backend brackets this so it
      * cannot corrupt in-progress hardware ink; a plain backend blits directly. A lone finished
      * stroke is not shown this way on a [rendersWetInkNatively] backend.
+     *
+     * [cleanRefresh] asks for a ghost-free repaint, for a change that *removes* ink (erasing) where
+     * the fast additive e-ink update would leave the cleared strokes faintly ghosted until a later
+     * full refresh; it costs a slightly heavier update. Backends without e-ink ghosting ignore it.
      */
-    fun present(composite: Bitmap)
+    fun present(composite: Bitmap, cleanRefresh: Boolean = false)
 
     /** Stops capturing and releases the surface. */
     fun detach()

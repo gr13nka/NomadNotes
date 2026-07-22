@@ -110,8 +110,8 @@ class OnyxPenBackend(
         controller?.setStrokeAppearance(tool, widthBase, grayLevel)
     }
 
-    override fun present(composite: Bitmap) {
-        controller?.renderToScreen(composite)
+    override fun present(composite: Bitmap, cleanRefresh: Boolean) {
+        controller?.renderToScreen(composite, cleanRefresh)
     }
 
     override fun detach() {

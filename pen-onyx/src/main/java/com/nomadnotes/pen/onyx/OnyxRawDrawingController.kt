@@ -213,8 +213,13 @@ class OnyxRawDrawingController(
     }
 
     /**
-     * Blits [bitmap] onto the surface using the e-ink handwriting update mode. Used to show
-     * persisted strokes (and to clear), since raw drawing's wet ink is not retained.
+     * Blits [bitmap] onto the surface. Used to show persisted strokes (and to clear), since raw
+     * drawing's wet ink is not retained.
+     *
+     * The default waveform is the fast handwriting-repaint mode, tuned for adding dark ink. When
+     * [clean] is set the blit instead uses [ERASE_CLEAN_UPDATE_MODE], an anti-ghost waveform for a
+     * repaint that *removes* ink: the fast additive mode leaves the erased strokes faintly ghosted
+     * (a visible "blink") until a later full refresh, which the cleaner mode avoids.
      *
      * A lockCanvas/unlockCanvasAndPost corrupts TouchHelper's rendering only while raw drawing is
      * actively rendering, so the blit is bracketed by disable/enable exactly then; when raw drawing
@@ -223,11 +228,12 @@ class OnyxRawDrawingController(
      * enabled state is preserved, so presenting while paused (e.g. a panel is open) does not
      * re-enable drawing.
      */
-    fun renderToScreen(bitmap: Bitmap) {
+    fun renderToScreen(bitmap: Bitmap, clean: Boolean = false) {
         val bracket = rawDrawingOpen && drawingEnabled
         if (bracket) touchHelper.setRawDrawingEnabled(false)
         try {
-            EpdController.setViewDefaultUpdateMode(surfaceView, UpdateMode.HAND_WRITING_REPAINT_MODE)
+            val mode = if (clean) ERASE_CLEAN_UPDATE_MODE else UpdateMode.HAND_WRITING_REPAINT_MODE
+            EpdController.setViewDefaultUpdateMode(surfaceView, mode)
             val canvas = surfaceView.holder.lockCanvas() ?: return
             try {
                 canvas.drawColor(Color.WHITE)
@@ -281,6 +287,14 @@ class OnyxRawDrawingController(
 
         /** Fallback pressure range when the device reports a nonpositive maximum (see [maxPressure]). */
         private const val DEFAULT_MAX_PRESSURE = 4096f
+
+        /**
+         * Waveform for a repaint that removes ink (see [renderToScreen]'s `clean`). REGAL is Onyx's
+         * anti-ghost mode: it clears the erased strokes without the full-screen flash a GC refresh
+         * would cause. Tune here if erased ink still ghosts (try [UpdateMode.GC] for a full clear) or
+         * flashes too much.
+         */
+        private val ERASE_CLEAN_UPDATE_MODE = UpdateMode.REGAL
 
         /** Onyx Boox hardware reports "ONYX" as the manufacturer; only there is raw drawing real. */
         fun isBooxDevice(): Boolean = Build.MANUFACTURER.equals("ONYX", ignoreCase = true)
