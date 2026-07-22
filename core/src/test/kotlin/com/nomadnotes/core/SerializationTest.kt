@@ -41,6 +41,34 @@ class SerializationTest {
     }
 
     @Test
+    fun `page with links round-trips`() {
+        val page = samplePage().copy(
+            links = listOf(
+                PageLink(
+                    id = LinkId.random(),
+                    region = LinkRegion(10f, 20f, 110f, 60f),
+                    targetNotebookId = NotebookId("nb-target"),
+                    targetPageId = PageId("page-target"),
+                ),
+            ),
+        )
+        assertEquals(page, NotesJson.decodePage(NotesJson.encodePage(page)))
+    }
+
+    @Test
+    fun `page json without links field decodes with empty links`() {
+        // A page written before links existed simply has no `links` key; dropping it from an
+        // encoded page reproduces that older on-disk shape.
+        val legacyJson = NotesJson.encodePage(samplePage()).replace(",\"links\":[]", "")
+        assertFalse("precondition: the links key was removed", legacyJson.contains("\"links\""))
+
+        val decoded = NotesJson.decodePage(legacyJson)
+
+        assertTrue(decoded.links.isEmpty())
+        assertEquals(1, decoded.formatVersion)
+    }
+
+    @Test
     fun `notebook survives an encode-decode roundtrip unchanged`() {
         val notebook = Notebook(
             id = NotebookId("nb-1"),

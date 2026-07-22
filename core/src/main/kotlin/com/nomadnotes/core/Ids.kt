@@ -49,3 +49,11 @@ value class StrokeId(val value: String) {
         fun random(): StrokeId = StrokeId(UUID.randomUUID().toString())
     }
 }
+
+@JvmInline
+@Serializable
+value class LinkId(val value: String) {
+    companion object {
+        fun random(): LinkId = LinkId(UUID.randomUUID().toString())
+    }
+}

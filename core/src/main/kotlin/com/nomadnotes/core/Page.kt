@@ -21,6 +21,9 @@ import kotlinx.serialization.json.JsonElement
  *   Holds the main layer plus up to four extra layers.
  * @property mainLayerId the layer new strokes land on by default; always the id of a layer
  *   present in [layers], and that layer cannot be removed.
+ * @property links the page's tap-to-jump buttons, bound to the main layer's circled handwriting.
+ *   Each maps a fixed page region to a target notebook page. Defaults to empty so pages written
+ *   before links existed still decode; adding the field does not bump [formatVersion].
  * @property formatVersion on-disk schema version of this page, for migrations.
  * @property extra forward-compatibility escape hatch for page-level fields written by a newer
  *   app version; preserved verbatim across a decode/encode roundtrip. See [Stroke.extra].
@@ -31,6 +34,7 @@ data class Page(
     val templateRef: String? = null,
     val layers: List<Layer>,
     val mainLayerId: LayerId,
+    val links: List<PageLink> = emptyList(),
     val formatVersion: Int = 1,
     val extra: Map<String, JsonElement> = emptyMap(),
 ) {
