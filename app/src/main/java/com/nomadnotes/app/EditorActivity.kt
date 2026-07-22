@@ -151,6 +151,11 @@ class EditorActivity : ComponentActivity() {
     private val saveMutex = Mutex()
     private var autosaveJob: Job? = null
 
+    // A pending re-enable of pen capture, posted by [withChromeRefresh] after a chrome action so the
+    // Compose repaint reaches the panel before raw drawing resumes; held so a rapid next action can
+    // cancel it, and so onPause can drop it before we background.
+    private var pendingChromeReenable: Runnable? = null
+
     // Toolbar/panel state, hoisted here so the AndroidView canvas can read none of it. The pen
     // listener also reads the drawing ones (tool/width/shade/active layer), but a plain value read
     // creates no recomposition dependency.
@@ -210,7 +215,10 @@ class EditorActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        // Stop raw drawing before we background so the pen does not draw while we are not foreground.
+        // Stop raw drawing before we background so the pen does not draw while we are not foreground;
+        // drop any pending chrome resume so it cannot re-enable capture after we have paused.
+        pendingChromeReenable?.let { surfaceView.removeCallbacks(it) }
+        pendingChromeReenable = null
         backend.setEnabled(false)
         super.onPause()
         // onPause can be the last callback before the process is killed, so persist synchronously:
@@ -692,6 +700,29 @@ class EditorActivity : ComponentActivity() {
     }
 
     /**
+     * Runs a chrome action (a toolbar or page mutation) with pen capture briefly paused, so the
+     * Compose repaint the action triggers actually reaches the e-ink panel.
+     *
+     * On Onyx firmware, while raw drawing is enabled the panel suppresses normal window rendering, so
+     * a tool highlight or page-counter change does not appear until some later full refresh — the
+     * toolbar looks frozen for seconds after drawing. Disabling the backend lets the frame through; a
+     * posted continuation resumes capture after [CHROME_REFRESH_MS], long enough for the frame to
+     * land. Resuming goes through [updateBackendEnabled] rather than a blind enable, so an action that
+     * opened a panel keeps capture suppressed. A rapid next action cancels the prior pending resume.
+     */
+    private fun withChromeRefresh(action: () -> Unit) {
+        pendingChromeReenable?.let { surfaceView.removeCallbacks(it) }
+        backend.setEnabled(false)
+        action()
+        val resume = Runnable {
+            pendingChromeReenable = null
+            updateBackendEnabled()
+        }
+        pendingChromeReenable = resume
+        surfaceView.postDelayed(resume, CHROME_REFRESH_MS)
+    }
+
+    /**
      * Pushes the toolbar's on-screen bounds to the backend as an exclude rect, in surface-local
      * pixels, so a pen stroke starting on the toolbar is never captured as ink. Called on each
      * toolbar layout; deduped so a stable layout does not reconfigure the backend's capture region.
@@ -706,6 +737,7 @@ class EditorActivity : ComponentActivity() {
         )
         if (rect == toolbarExcludeRect) return
         toolbarExcludeRect = rect
+        Log.i(TAG, "Toolbar exclude rect: $rect")
         backend.setExcludeRects(listOf(rect))
     }
 
@@ -830,12 +862,17 @@ class EditorActivity : ComponentActivity() {
 
     @Composable
     private fun EditorScreen() {
-        Column(Modifier.fillMaxSize()) {
+        // Full-bleed canvas with the toolbar overlaid on top, matching the drawing spike's proven
+        // geometry: the SurfaceView fills the window, so the measured toolbar exclude rect lands as a
+        // positive on-surface region (in a Column the toolbar sat above the surface and its rect was
+        // off-surface — a no-op that let pen taps on the toolbar reach the raw-input reader). The
+        // toolbar's opaque background hides the ink beneath it. Overlays draw last, so when a panel is
+        // open its scrim also dims the toolbar strip — acceptable, and it keeps the panel fully visible
+        // rather than clipped under the toolbar.
+        Box(Modifier.fillMaxSize()) {
+            CanvasView()
             EditorToolbar()
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                CanvasView()
-                EditorOverlays()
-            }
+            EditorOverlays()
         }
     }
 
@@ -861,52 +898,56 @@ class EditorActivity : ComponentActivity() {
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                EinkToggle(stringResource(R.string.action_pen), selected = !uiEraser && uiTool == Tool.PEN) { selectTool(Tool.PEN) }
-                EinkToggle(stringResource(R.string.action_pencil), selected = !uiEraser && uiTool == Tool.PENCIL) { selectTool(Tool.PENCIL) }
-                EinkToggle(stringResource(R.string.action_marker), selected = !uiEraser && uiTool == Tool.MARKER) { selectTool(Tool.MARKER) }
-                EinkToggle(stringResource(R.string.action_eraser), selected = uiEraser) { selectEraser() }
-                EinkToggle(stringResource(R.string.action_lasso), selected = uiLasso) { selectLasso() }
+                // Every chrome mutation is wrapped in withChromeRefresh: raw drawing suppresses normal
+                // window rendering on Onyx, so without the brief capture pause the toolbar repaint (tool
+                // highlight, page counter) would not reach the panel until a later full refresh. The
+                // panel toggles are the exception — they drive updateBackendEnabled themselves.
+                EinkToggle(stringResource(R.string.action_pen), selected = !uiEraser && uiTool == Tool.PEN) { withChromeRefresh { selectTool(Tool.PEN) } }
+                EinkToggle(stringResource(R.string.action_pencil), selected = !uiEraser && uiTool == Tool.PENCIL) { withChromeRefresh { selectTool(Tool.PENCIL) } }
+                EinkToggle(stringResource(R.string.action_marker), selected = !uiEraser && uiTool == Tool.MARKER) { withChromeRefresh { selectTool(Tool.MARKER) } }
+                EinkToggle(stringResource(R.string.action_eraser), selected = uiEraser) { withChromeRefresh { selectEraser() } }
+                EinkToggle(stringResource(R.string.action_lasso), selected = uiLasso) { withChromeRefresh { selectLasso() } }
                 // The selection action bar lives in the toolbar so its buttons sit in the already-excluded
                 // strip (no dynamic raw-drawing exclude rect) and appearing does not resize the canvas.
                 if (uiHasSelection || uiClipboardHasContent) {
                     ToolbarDivider()
                     if (uiHasSelection) {
-                        EinkButton(stringResource(R.string.action_copy)) { copySelection() }
-                        EinkButton(stringResource(R.string.action_delete)) { deleteSelection() }
-                        EinkButton(stringResource(R.string.action_deselect)) { clearSelection() }
+                        EinkButton(stringResource(R.string.action_copy)) { withChromeRefresh { copySelection() } }
+                        EinkButton(stringResource(R.string.action_delete)) { withChromeRefresh { deleteSelection() } }
+                        EinkButton(stringResource(R.string.action_deselect)) { withChromeRefresh { clearSelection() } }
                     }
                     if (uiClipboardHasContent) {
-                        EinkButton(stringResource(R.string.action_paste)) { pasteClipboard() }
+                        EinkButton(stringResource(R.string.action_paste)) { withChromeRefresh { pasteClipboard() } }
                     }
                 }
                 ToolbarDivider()
 
-                EinkToggle(stringResource(R.string.width_small), selected = uiWidth == StrokeWidth.S) { setWidth(StrokeWidth.S) }
-                EinkToggle(stringResource(R.string.width_medium), selected = uiWidth == StrokeWidth.M) { setWidth(StrokeWidth.M) }
-                EinkToggle(stringResource(R.string.width_large), selected = uiWidth == StrokeWidth.L) { setWidth(StrokeWidth.L) }
+                EinkToggle(stringResource(R.string.width_small), selected = uiWidth == StrokeWidth.S) { withChromeRefresh { setWidth(StrokeWidth.S) } }
+                EinkToggle(stringResource(R.string.width_medium), selected = uiWidth == StrokeWidth.M) { withChromeRefresh { setWidth(StrokeWidth.M) } }
+                EinkToggle(stringResource(R.string.width_large), selected = uiWidth == StrokeWidth.L) { withChromeRefresh { setWidth(StrokeWidth.L) } }
                 ToolbarDivider()
 
-                EinkToggle(stringResource(R.string.shade_black), selected = uiShade == InkShade.BLACK) { setShade(InkShade.BLACK) }
-                EinkToggle(stringResource(R.string.shade_dark), selected = uiShade == InkShade.DARK) { setShade(InkShade.DARK) }
-                EinkToggle(stringResource(R.string.shade_light), selected = uiShade == InkShade.LIGHT) { setShade(InkShade.LIGHT) }
+                EinkToggle(stringResource(R.string.shade_black), selected = uiShade == InkShade.BLACK) { withChromeRefresh { setShade(InkShade.BLACK) } }
+                EinkToggle(stringResource(R.string.shade_dark), selected = uiShade == InkShade.DARK) { withChromeRefresh { setShade(InkShade.DARK) } }
+                EinkToggle(stringResource(R.string.shade_light), selected = uiShade == InkShade.LIGHT) { withChromeRefresh { setShade(InkShade.LIGHT) } }
                 ToolbarDivider()
 
-                EinkButton(stringResource(R.string.action_undo), enabled = uiCanUndo) { undo() }
-                EinkButton(stringResource(R.string.action_redo), enabled = uiCanRedo) { redo() }
+                EinkButton(stringResource(R.string.action_undo), enabled = uiCanUndo) { withChromeRefresh { undo() } }
+                EinkButton(stringResource(R.string.action_redo), enabled = uiCanRedo) { withChromeRefresh { redo() } }
                 ToolbarDivider()
 
                 EinkToggle(stringResource(R.string.action_layers), selected = uiLayersOpen) { toggleLayersPanel() }
                 EinkToggle(stringResource(R.string.action_template), selected = uiTemplateOpen) { toggleTemplatePanel() }
                 ToolbarDivider()
 
-                EinkButton(stringResource(R.string.nav_prev), enabled = uiPageIndex > 0) { goToPage(uiPageIndex - 1) }
+                EinkButton(stringResource(R.string.nav_prev), enabled = uiPageIndex > 0) { withChromeRefresh { goToPage(uiPageIndex - 1) } }
                 Text(
                     stringResource(R.string.page_position, uiPageIndex + 1, uiPageCount),
                     color = EinkBlack,
                     fontSize = 15.sp,
                 )
-                EinkButton(stringResource(R.string.nav_next), enabled = uiPageIndex < uiPageCount - 1) { goToPage(uiPageIndex + 1) }
-                EinkButton(stringResource(R.string.action_insert_page)) { insertPageAfterCurrent() }
+                EinkButton(stringResource(R.string.nav_next), enabled = uiPageIndex < uiPageCount - 1) { withChromeRefresh { goToPage(uiPageIndex + 1) } }
+                EinkButton(stringResource(R.string.action_insert_page)) { withChromeRefresh { insertPageAfterCurrent() } }
                 EinkButton(stringResource(R.string.action_delete_page), enabled = uiPageCount > 1) { uiDeletePageDialog = true }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(EinkBlack))
@@ -937,7 +978,7 @@ class EditorActivity : ComponentActivity() {
                 cancelLabel = stringResource(R.string.action_cancel),
                 onConfirm = {
                     uiDeletePageDialog = false
-                    deleteCurrentPage()
+                    withChromeRefresh { deleteCurrentPage() }
                 },
                 onDismiss = { uiDeletePageDialog = false },
             )
@@ -1024,6 +1065,12 @@ class EditorActivity : ComponentActivity() {
 
         /** Idle time after the last edit before the debounced autosave fires. */
         private const val AUTOSAVE_DELAY_MS = 5_000L
+
+        /**
+         * How long pen capture stays paused around a chrome action, so the Compose repaint reaches the
+         * e-ink panel before raw drawing resumes (see [withChromeRefresh]). Tune on device.
+         */
+        private const val CHROME_REFRESH_MS = 100L
 
         /** Eraser disc radius, in page pixels, hit-tested at each gesture point. */
         private const val ERASER_RADIUS = 20f
