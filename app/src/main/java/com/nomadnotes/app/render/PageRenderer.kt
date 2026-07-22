@@ -7,6 +7,7 @@ import android.graphics.PorterDuff
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.Stroke
+import com.nomadnotes.core.StrokeId
 
 /**
  * Turns a [Page] into the single [Bitmap] the editor blits to its drawing surface, and keeps that
@@ -71,8 +72,13 @@ class PageRenderer {
      * Rebuilds every layer cache from [page] and re-blends the composite over [template] (the
      * page's resolved stationery, or null for a blank white page). Call this whenever the page's
      * strokes, layers, or template change; [appendStroke] is the one exception for a lone new stroke.
+     *
+     * [excludeStrokeIds] omits those strokes from every layer, so the composite shows the page *as
+     * if* they were not there. The editor uses this to render the static base behind a live lasso
+     * move — the moving strokes are drawn separately, translated, on top of that base. A later
+     * [renderFull] with the default (empty) set restores them.
      */
-    fun renderFull(page: Page, template: Bitmap?) {
+    fun renderFull(page: Page, template: Bitmap?, excludeStrokeIds: Set<StrokeId> = emptySet()) {
         if (compositeBitmap == null) return
         templateBitmap = template
         dropCachesForRemovedLayers(page)
@@ -80,7 +86,7 @@ class PageRenderer {
             val bitmap = layerBitmaps.getOrPut(layer.id) { newLayerBitmap() }
             val canvas = Canvas(bitmap)
             canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-            for (stroke in layer.strokes) strokeRenderer.draw(canvas, stroke)
+            for (stroke in strokesToDraw(layer.strokes, excludeStrokeIds)) strokeRenderer.draw(canvas, stroke)
         }
         layers = page.layers.map { LayerSlot(it.id, it.visible) }
         recomposite()
@@ -148,4 +154,15 @@ class PageRenderer {
     }
 
     private data class LayerSlot(val id: LayerId, val visible: Boolean)
+
+    internal companion object {
+        /**
+         * The strokes [renderFull] rasterises for a layer: all of [strokes], minus any whose id is in
+         * [excluded]. Split out as a pure function so the exclusion rule — the one piece of the
+         * lasso-move base render that does not touch an Android graphics surface — is unit-testable
+         * without Robolectric.
+         */
+        internal fun strokesToDraw(strokes: List<Stroke>, excluded: Set<StrokeId>): List<Stroke> =
+            if (excluded.isEmpty()) strokes else strokes.filter { it.id !in excluded }
+    }
 }

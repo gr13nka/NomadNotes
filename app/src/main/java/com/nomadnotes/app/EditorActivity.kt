@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Rect
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -51,6 +52,7 @@ import com.nomadnotes.app.input.OnyxPenBackend
 import com.nomadnotes.app.input.PenBackend
 import com.nomadnotes.app.render.PageRenderer
 import com.nomadnotes.app.render.SelectionRenderer
+import com.nomadnotes.app.render.StrokeRenderer
 import com.nomadnotes.app.render.TemplateRef
 import com.nomadnotes.app.render.TemplateResolver
 import com.nomadnotes.app.storage.NotebookStorage
@@ -120,6 +122,10 @@ class EditorActivity : ComponentActivity() {
     private val renderer = PageRenderer()
     private val selectionRenderer = SelectionRenderer()
 
+    // Draws the selected strokes onto the live move-drag preview (the same ink path a committed
+    // stroke takes through PageRenderer, so the previewed strokes look identical to the result).
+    private val strokeRenderer = StrokeRenderer()
+
     // Chosen in onCreate: the Onyx raw-drawing backend on Boox hardware, the plain touch backend
     // everywhere else. The editor talks only to the interface and never learns which it holds.
     private lateinit var backend: PenBackend
@@ -143,6 +149,22 @@ class EditorActivity : ComponentActivity() {
     private var selectionPolygon: List<Vec2>? = null
     private var clipboard: List<Stroke> = emptyList()
     private var decorationBitmap: Bitmap? = null
+
+    // Live lasso-preview state, alive only from the first onLassoMove of a gesture to its finishing
+    // onLassoGesture (all on the main thread). `lassoGestureStart` is the gesture's first sample —
+    // non-null while a gesture is being previewed — used both to detect a move (start inside the
+    // selection box) and to measure the drag delta. A MOVE drag additionally sets `draggingSelection`
+    // (the selection being moved) and `dragBaseBitmap` (the composite rendered *without* those
+    // strokes, so each frame is that base plus the strokes redrawn at the current offset);
+    // `dragStrokes` caches those strokes so no per-frame lookup is needed. The bitmap is allocated at
+    // drag start and recycled at drag end. `lassoDrawSamples` accumulates a new lasso's outline for
+    // the wet-ink-less preview; `lastPreviewPresentMs` throttles presents during a fast gesture.
+    private var lassoGestureStart: Vec2? = null
+    private var draggingSelection: SelectionState? = null
+    private var dragBaseBitmap: Bitmap? = null
+    private var dragStrokes: List<Stroke> = emptyList()
+    private val lassoDrawSamples = ArrayList<Vec2>()
+    private var lastPreviewPresentMs = 0L
 
     private var surfaceWidth = 0
     private var surfaceHeight = 0
@@ -236,6 +258,8 @@ class EditorActivity : ComponentActivity() {
         templateResolver.release()
         decorationBitmap?.recycle()
         decorationBitmap = null
+        dragBaseBitmap?.recycle()
+        dragBaseBitmap = null
         super.onDestroy()
     }
 
@@ -406,7 +430,9 @@ class EditorActivity : ComponentActivity() {
 
         override fun onEraseGesture(points: List<StrokePoint>) = eraseAlong(points)
 
-        override fun onLassoGesture(points: List<StrokePoint>) = handleLassoGesture(points)
+        override fun onLassoGesture(points: List<StrokePoint>) = endLassoGesture(points)
+
+        override fun onLassoMove(point: StrokePoint) = previewLasso(point)
     }
 
     /**
@@ -440,11 +466,134 @@ class EditorActivity : ComponentActivity() {
     // --- lasso selection -------------------------------------------------------------------
 
     /**
+     * A live sample of an in-progress LASSO gesture (see [PenBackend.Listener.onLassoMove]). The
+     * first sample of the gesture decides its shape, held until [endLassoGesture]:
+     *  - starting inside the current selection's box begins a MOVE drag — the selected strokes are
+     *    previewed lifted off [dragBaseBitmap] (the page rendered without them) and dragged under the
+     *    pen, so the user can aim before committing;
+     *  - starting elsewhere is a DRAW — its growing outline is previewed over the page, but only on a
+     *    backend without hardware wet ink (the Onyx panel shows nothing mid-lasso by design, which the
+     *    user accepted, so drawing a new lasso stays preview-less there).
+     * Presents are throttled to [LASSO_PREVIEW_MIN_INTERVAL_MS]; the exact final position is committed
+     * by [endLassoGesture] regardless of what the last throttled frame showed.
+     */
+    private fun previewLasso(point: StrokePoint) {
+        val here = Vec2(point.x, point.y)
+        val start = lassoGestureStart
+        if (start == null) {
+            beginLassoPreview(here)
+            return
+        }
+        val dragging = draggingSelection
+        if (dragging != null) {
+            if (throttleAllowsPresent()) presentMoveDrag(dx = here.x - start.x, dy = here.y - start.y)
+        } else if (!backend.rendersWetInkNatively) {
+            lassoDrawSamples.add(here)
+            if (throttleAllowsPresent()) presentLassoDraw()
+        }
+    }
+
+    /** Decides a fresh LASSO gesture from its first sample: a move drag if it began inside the selection, else a draw. */
+    private fun beginLassoPreview(start: Vec2) {
+        lassoGestureStart = start
+        lastPreviewPresentMs = SystemClock.uptimeMillis()
+        val selection = selection
+        if (selection != null && selection.bounds.contains(start.x, start.y)) {
+            beginMoveDrag(selection)
+            presentMoveDrag(dx = 0f, dy = 0f) // lift the selection off its base straight away
+        } else if (!backend.rendersWetInkNatively) {
+            lassoDrawSamples.clear()
+            lassoDrawSamples.add(start)
+        }
+    }
+
+    /**
+     * Enters a move-drag preview for [selection]: caches its strokes and renders [dragBaseBitmap], the
+     * static page the strokes are dragged over — the composite with those strokes removed. The shared
+     * renderer is left holding the full page again afterwards, so [renderer].composite() stays the
+     * committed page throughout the drag (the preview draws from [dragBaseBitmap], never from it). A
+     * no-op if the surface or the selection's layer is unavailable.
+     */
+    private fun beginMoveDrag(selection: SelectionState) {
+        val session = session ?: return
+        if (surfaceWidth <= 0 || surfaceHeight <= 0) return
+        val layer = session.page.layers.firstOrNull { it.id == selection.layerId } ?: return
+        val ids = selection.strokeIds.toSet()
+        dragStrokes = layer.strokes.filter { it.id in ids }
+        val template = templateResolver.resolve(session.page.templateRef, surfaceWidth, surfaceHeight)
+        renderer.renderFull(session.page, template, excludeStrokeIds = ids)
+        dragBaseBitmap?.recycle()
+        val base = Bitmap.createBitmap(surfaceWidth, surfaceHeight, Bitmap.Config.ARGB_8888)
+            .also { dragBaseBitmap = it }
+        Canvas(base).drawBitmap(renderer.composite(), 0f, 0f, null)
+        // Restore the shared composite to the full page, so a zero-delta commit or a cancel repaints
+        // correctly from it without a stale exclusion.
+        renderer.renderFull(session.page, template)
+        draggingSelection = selection
+    }
+
+    /** Presents [dragBaseBitmap] with the dragged strokes and their box redrawn at offset ([dx], [dy]). */
+    private fun presentMoveDrag(dx: Float, dy: Float) {
+        val base = dragBaseBitmap ?: return
+        val selection = draggingSelection ?: return
+        val scratch = decorationScratch() ?: return
+        val canvas = Canvas(scratch)
+        canvas.drawBitmap(base, 0f, 0f, null)
+        val saved = canvas.save()
+        canvas.translate(dx, dy)
+        for (stroke in dragStrokes) strokeRenderer.draw(canvas, stroke)
+        canvas.restoreToCount(saved)
+        selectionRenderer.drawBounds(canvas, selection.bounds.translated(dx, dy))
+        backend.presentDuringCapture(scratch)
+    }
+
+    /** Presents the page with the in-progress lasso outline (wet-ink-less backends only). */
+    private fun presentLassoDraw() {
+        val scratch = decorationScratch() ?: return
+        val canvas = Canvas(scratch)
+        canvas.drawBitmap(renderer.composite(), 0f, 0f, null)
+        selectionRenderer.drawPolygon(canvas, lassoDrawSamples)
+        backend.presentDuringCapture(scratch)
+    }
+
+    /** True at most once per [LASSO_PREVIEW_MIN_INTERVAL_MS], to cap the live-preview frame rate. */
+    private fun throttleAllowsPresent(): Boolean {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastPreviewPresentMs < LASSO_PREVIEW_MIN_INTERVAL_MS) return false
+        lastPreviewPresentMs = now
+        return true
+    }
+
+    /** Ends the current gesture's live preview and frees the drag base. Safe to call with none active. */
+    private fun endLassoPreview() {
+        lassoGestureStart = null
+        draggingSelection = null
+        dragStrokes = emptyList()
+        lassoDrawSamples.clear()
+        dragBaseBitmap?.recycle()
+        dragBaseBitmap = null
+    }
+
+    /**
+     * A LASSO gesture ended: tear down its live preview, then act on it. An empty path means the
+     * gesture was abandoned (a touch cancel) — commit nothing and just repaint over whatever the
+     * preview left on the surface; otherwise route it as a move or a new lasso ([handleLassoGesture]).
+     */
+    private fun endLassoGesture(points: List<StrokePoint>) {
+        val hadPreview = lassoGestureStart != null
+        endLassoPreview()
+        if (points.isEmpty()) {
+            if (hadPreview) present()
+            return
+        }
+        handleLassoGesture(points)
+    }
+
+    /**
      * A finished LASSO-mode gesture. The backend cannot tell a lasso from a move, so the decision is
      * made here from the current selection: a gesture that *starts inside* the selection box is a move
-     * (by the start→end delta), otherwise it is a new lasso polygon. Both backends deliver the whole
-     * gesture at pen-up, so a move commits once, at the end — there is no live drag (a deliberate UX
-     * simplification: on Onyx live drag risks latency; the touch path simply matches it).
+     * (by the start→end delta), otherwise it is a new lasso polygon. The live preview (see
+     * [previewLasso]) tracks the same decision; this is the authoritative commit at pen-up.
      */
     private fun handleLassoGesture(points: List<StrokePoint>) {
         if (points.isEmpty()) return
@@ -548,6 +697,11 @@ class EditorActivity : ComponentActivity() {
         selection = null
         selectionPolygon = null
         updateSelectionUi()
+        // The decoration scratch is only needed while a selection is on screen; free it now and let
+        // the next selection rebuild it on demand (decorationScratch), rather than holding a
+        // surface-sized bitmap through every non-selection edit.
+        decorationBitmap?.recycle()
+        decorationBitmap = null
         if (had) presentComposite()
     }
 
@@ -1088,6 +1242,14 @@ class EditorActivity : ComponentActivity() {
 
         /** Eraser disc radius, in page pixels, hit-tested at each gesture point. */
         private const val ERASER_RADIUS = 20f
+
+        /**
+         * Minimum spacing between live lasso-preview presents (a move drag or a draw outline), so a
+         * fast gesture does not post more surface blits than the panel can keep up with. Pen-up
+         * commits the exact final position regardless, so dropped intermediate frames are harmless.
+         * Tune on device against the panel's refresh cadence.
+         */
+        private const val LASSO_PREVIEW_MIN_INTERVAL_MS = 80L
 
         /** How far a paste is offset from the copied strokes, in page pixels, so it does not hide them. */
         private const val PASTE_OFFSET_PX = 24f

@@ -49,6 +49,11 @@ class OnyxRawDrawingController(
     private val surfaceView: SurfaceView,
     private val onDrawingGesture: (List<StrokePoint>) -> Unit,
     private val onEraseGesture: (List<StrokePoint>) -> Unit = {},
+    // A live per-sample callback during a non-wet-ink gesture (a selection: erase or lasso), for
+    // previewing it as it is drawn. Fires only while wet ink is off — during inking the panel paints
+    // the stroke itself, so there is nothing to preview. Like the gesture callbacks, it runs on
+    // Onyx's input thread; the caller marshals and decides whether it cares (only lasso does).
+    private val onDrawingMove: (StrokePoint) -> Unit = {},
 ) {
 
     // Configuration the caller has chosen, re-applied verbatim whenever raw drawing is (re)opened:
@@ -85,8 +90,14 @@ class OnyxRawDrawingController(
             Log.i(TAG, "onEndRawDrawing at (${point?.x}, ${point?.y})")
         }
 
-        // Silent by design: this fires on every pen sample, so logging here floods the input thread.
-        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint?) = Unit
+        // Fires on every pen sample. Forwarded only while wet ink is off — i.e. the gesture is a
+        // selection (erase or lasso), the only case the caller previews live; during inking the panel
+        // paints the stroke itself and this would just flood the input thread. Never logged here for
+        // that same reason.
+        override fun onRawDrawingTouchPointMoveReceived(point: TouchPoint?) {
+            if (wetInkEnabled) return
+            onDrawingMove((point ?: return).toStrokePoint())
+        }
 
         override fun onRawDrawingTouchPointListReceived(pointList: TouchPointList?) {
             val points = pointList?.points ?: return
@@ -235,15 +246,7 @@ class OnyxRawDrawingController(
         if (bracket) touchHelper.setRawDrawingEnabled(false)
         try {
             EpdController.setViewDefaultUpdateMode(surfaceView, UpdateMode.HAND_WRITING_REPAINT_MODE)
-            val canvas = surfaceView.holder.lockCanvas()
-            if (canvas != null) {
-                try {
-                    canvas.drawColor(Color.WHITE)
-                    canvas.drawBitmap(bitmap, 0f, 0f, null)
-                } finally {
-                    surfaceView.holder.unlockCanvasAndPost(canvas)
-                }
-            }
+            lockAndBlit(bitmap)
             // TODO(erase-flash): this clears the whole panel, so every erase flashes heavily. To
             // confine the flash, refresh only the erased strokes' bounding box with
             // EpdController.refreshScreenRegion(surfaceView, l, t, r, b, mode) — that Rect would have
@@ -254,6 +257,35 @@ class OnyxRawDrawingController(
         } finally {
             EpdController.resetViewUpdateMode(surfaceView)
             if (bracket) touchHelper.setRawDrawingEnabled(true)
+        }
+    }
+
+    /**
+     * Blits [bitmap] onto the surface *during* an in-progress lasso gesture, for a live move/draw
+     * preview. Deliberately does NOT bracket the blit with a raw-drawing disable/enable the way
+     * [renderToScreen] does: toggling [TouchHelper.setRawDrawingEnabled] mid-gesture aborts the
+     * in-flight capture, so the finishing point-list would never arrive. Skipping the bracket is safe
+     * only because a lasso gesture runs with wet ink off (no hardware stroke render is in progress for
+     * the surface post to corrupt). LASSO-only; do not use for structural repaints.
+     */
+    fun presentDuringCapture(bitmap: Bitmap) {
+        try {
+            EpdController.setViewDefaultUpdateMode(surfaceView, UpdateMode.HAND_WRITING_REPAINT_MODE)
+            lockAndBlit(bitmap)
+        } finally {
+            EpdController.resetViewUpdateMode(surfaceView)
+        }
+    }
+
+    // Locks the surface and paints [bitmap] over white. The caller owns the update-mode setup and any
+    // raw-drawing bracketing around it; this is only the pixel copy.
+    private fun lockAndBlit(bitmap: Bitmap) {
+        val canvas = surfaceView.holder.lockCanvas() ?: return
+        try {
+            canvas.drawColor(Color.WHITE)
+            canvas.drawBitmap(bitmap, 0f, 0f, null)
+        } finally {
+            surfaceView.holder.unlockCanvasAndPost(canvas)
         }
     }
 
@@ -269,6 +301,15 @@ class OnyxRawDrawingController(
             )
         }
     }
+
+    // Normalizes a single live move sample (see [onDrawingMove]). timestampDelta is 0: a lone sample
+    // has no gesture-start reference, and the caller uses only x/y to track a move-drag offset.
+    private fun TouchPoint.toStrokePoint(): StrokePoint = StrokePoint(
+        x = x,
+        y = y,
+        pressure = (pressure / maxPressure).coerceIn(0f, 1f),
+        timestampDelta = 0L,
+    )
 
     private fun Tool.toStrokeStyle(): Int = when (this) {
         // Fountain varies width with pressure/speed, like the editor's pressure-modulated pen.

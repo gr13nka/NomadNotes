@@ -78,6 +78,16 @@ interface PenBackend {
      */
     fun present(composite: Bitmap, cleanRefresh: Boolean = false)
 
+    /**
+     * Blits [composite] *during* an in-progress [CaptureMode.LASSO] gesture, for the editor's live
+     * move/draw preview. Unlike [present], a raw-drawing backend must NOT bracket this with a
+     * raw-drawing disable/enable — that would abort the in-flight capture. Doing so is safe only
+     * because wet ink is off throughout a lasso gesture, so there is no hardware stroke render for
+     * the blit to corrupt. Call only while a lasso gesture is being captured; a backend with no
+     * hardware ink blits exactly as [present] does.
+     */
+    fun presentDuringCapture(composite: Bitmap)
+
     /** Stops capturing and releases the surface. */
     fun detach()
 
@@ -95,8 +105,20 @@ interface PenBackend {
 
         /**
          * A lasso gesture finished: its full path. The editor decides what it means — a new
-         * selection polygon, or (when it started inside the current selection's box) a move.
+         * selection polygon, or (when it started inside the current selection's box) a move. An
+         * empty list means the gesture was abandoned (e.g. a touch cancel): nothing to commit, drop
+         * any live preview and restore the page.
          */
         fun onLassoGesture(points: List<StrokePoint>)
+
+        /**
+         * A live sample of an in-progress LASSO-mode gesture, delivered repeatedly between pen-down
+         * and the finishing [onLassoGesture]. Emitted only while [captureMode] is [CaptureMode.LASSO],
+         * so the editor can preview a move-drag (or, on a backend without hardware wet ink, the lasso
+         * outline) as the pen moves. [point] is the latest sample, in page coordinates. A backend that
+         * cannot report live samples simply never calls this — the finishing [onLassoGesture] still
+         * carries the whole path.
+         */
+        fun onLassoMove(point: StrokePoint)
     }
 }

@@ -59,6 +59,9 @@ class OnyxPenBackend(
             // The drawing channel is routed by captureMode on the main thread (after the post), so it
             // reads the mode the editor last set; the erase channel is the hardware side button.
             onDrawingGesture = { points -> mainHandler.post { routeDrawingGesture(points) } },
+            // Live selection samples arrive whenever wet ink is off (erase or lasso); only lasso
+            // previews them, so routeDrawingMove drops them in any other mode.
+            onDrawingMove = { point -> mainHandler.post { routeDrawingMove(point) } },
             onEraseGesture = { points -> mainHandler.post { this.listener?.onEraseGesture(points) } },
         )
         this.controller = controller
@@ -78,6 +81,11 @@ class OnyxPenBackend(
             CaptureMode.ERASE -> listener.onEraseGesture(points)
             CaptureMode.LASSO -> listener.onLassoGesture(points)
         }
+    }
+
+    /** Routes a live selection sample: only the lasso previews a move, so erase samples are dropped. */
+    private fun routeDrawingMove(point: StrokePoint) {
+        if (captureMode == CaptureMode.LASSO) listener?.onLassoMove(point)
     }
 
     override fun setEnabled(enabled: Boolean) {
@@ -112,6 +120,12 @@ class OnyxPenBackend(
 
     override fun present(composite: Bitmap, cleanRefresh: Boolean) {
         controller?.renderToScreen(composite, cleanRefresh)
+    }
+
+    // Routed to the controller's un-bracketed blit so it does not abort the in-flight lasso capture
+    // (see [OnyxRawDrawingController.presentDuringCapture]).
+    override fun presentDuringCapture(composite: Bitmap) {
+        controller?.presentDuringCapture(composite)
     }
 
     override fun detach() {

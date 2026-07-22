@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
@@ -51,9 +50,6 @@ class AndroidPenBackend(
     // Rebuilt by [setStrokeAppearance] so the live preview approximates the committed stroke.
     private var inkPreviewPaint = strokePaint(Color.BLACK, INK_PREVIEW_WIDTH)
     private val erasePreviewPaint = strokePaint(ERASE_PREVIEW_COLOR, ERASE_PREVIEW_WIDTH)
-    private val lassoPreviewPaint = strokePaint(LASSO_PREVIEW_COLOR, LASSO_PREVIEW_WIDTH).apply {
-        pathEffect = DashPathEffect(floatArrayOf(LASSO_DASH_ON, LASSO_DASH_OFF), 0f)
-    }
     private val previewPath = Path()
 
     @SuppressLint("ClickableViewAccessibility")
@@ -90,6 +86,9 @@ class AndroidPenBackend(
         }
     }
 
+    // Plain touch has no hardware capture to abort, so a during-capture blit is just an ordinary one.
+    override fun presentDuringCapture(composite: Bitmap) = present(composite)
+
     @SuppressLint("ClickableViewAccessibility")
     override fun detach() {
         surfaceView?.setOnTouchListener(null)
@@ -107,7 +106,9 @@ class AndroidPenBackend(
                 gestureStart = event.eventTime
                 points.clear()
                 points.add(currentPointOf(event))
-                blitPreview()
+                // In LASSO mode the editor owns the preview (from onLassoMove), so this backend draws
+                // none — not even the first frame. INK/ERASE still get a live self-drawn preview.
+                if (captureMode != CaptureMode.LASSO) blitPreview()
                 true
             }
             MotionEvent.ACTION_MOVE -> {
@@ -116,7 +117,13 @@ class AndroidPenBackend(
                 // order so fast strokes keep their shape.
                 for (i in 0 until event.historySize) points.add(historicalPointOf(event, i))
                 points.add(currentPointOf(event))
-                blitPreview()
+                if (captureMode == CaptureMode.LASSO) {
+                    // The editor renders the lasso preview (a move drag, or the outline) from these
+                    // live samples; forward the latest one and draw nothing here.
+                    listener?.onLassoMove(points.last())
+                } else {
+                    blitPreview()
+                }
                 true
             }
             MotionEvent.ACTION_UP -> {
@@ -127,8 +134,11 @@ class AndroidPenBackend(
             }
             MotionEvent.ACTION_CANCEL -> {
                 if (!capturing) return false
+                val wasLasso = captureMode == CaptureMode.LASSO
                 resetGesture()
-                blitComposite()
+                // A cancelled lasso: tell the editor with an empty gesture so it drops its live
+                // preview and restores the page. Other modes just wipe their self-drawn preview.
+                if (wasLasso) listener?.onLassoGesture(emptyList()) else blitComposite()
                 true
             }
             else -> false
@@ -178,7 +188,9 @@ class AndroidPenBackend(
         val paint = when (captureMode) {
             CaptureMode.INK -> inkPreviewPaint
             CaptureMode.ERASE -> erasePreviewPaint
-            CaptureMode.LASSO -> lassoPreviewPaint
+            // The editor renders the lasso preview itself (from onLassoMove), so this backend never
+            // reaches here in LASSO mode — blitPreview is skipped for it. Guard defensively.
+            CaptureMode.LASSO -> return
         }
         if (points.size == 1) {
             canvas.drawPoint(points[0].x, points[0].y, paint)
@@ -229,15 +241,5 @@ class AndroidPenBackend(
         /** The eraser preview hints its path and rough reach without looking like drawn ink. */
         const val ERASE_PREVIEW_WIDTH = 12f
         const val ERASE_PREVIEW_COLOR = 0x66808080 // translucent gray
-
-        /**
-         * The lasso preview is a thin dashed line, distinct from ink and eraser. This backend cannot
-         * tell a lasso from a move (both arrive in LASSO mode), so a move-drag traces this dashed line
-         * too; that is a dev-path cosmetic quirk only — the committed result is still a move.
-         */
-        const val LASSO_PREVIEW_WIDTH = 2f
-        const val LASSO_PREVIEW_COLOR = 0xCC000000.toInt() // near-opaque black
-        const val LASSO_DASH_ON = 12f
-        const val LASSO_DASH_OFF = 8f
     }
 }
