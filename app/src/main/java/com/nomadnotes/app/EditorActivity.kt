@@ -471,9 +471,9 @@ class EditorActivity : ComponentActivity() {
      *  - starting inside the current selection's box begins a MOVE drag — the selected strokes are
      *    previewed lifted off [dragBaseBitmap] (the page rendered without them) and dragged under the
      *    pen, so the user can aim before committing;
-     *  - starting elsewhere is a DRAW — its growing outline is previewed over the page, but only on a
-     *    backend without hardware wet ink (the Onyx panel shows nothing mid-lasso by design, which the
-     *    user accepted, so drawing a new lasso stays preview-less there).
+     *  - starting elsewhere is a DRAW — its growing outline (a dashed polyline) is previewed over the
+     *    page on both backends. On Onyx a lasso is captured as ordinary touch with raw drawing off, so
+     *    the outline blits the same way the move-drag preview does.
      * Presents are throttled to [LASSO_PREVIEW_MIN_INTERVAL_MS]; the exact final position is committed
      * by [endLassoGesture] regardless of what the last throttled frame showed.
      */
@@ -487,7 +487,7 @@ class EditorActivity : ComponentActivity() {
         val dragging = draggingSelection
         if (dragging != null) {
             if (throttleAllowsPresent()) presentMoveDrag(dx = here.x - start.x, dy = here.y - start.y)
-        } else if (!backend.rendersWetInkNatively) {
+        } else {
             lassoDrawSamples.add(here)
             if (throttleAllowsPresent()) presentLassoDraw()
         }
@@ -501,7 +501,7 @@ class EditorActivity : ComponentActivity() {
         if (selection != null && selection.bounds.contains(start.x, start.y)) {
             beginMoveDrag(selection)
             presentMoveDrag(dx = 0f, dy = 0f) // lift the selection off its base straight away
-        } else if (!backend.rendersWetInkNatively) {
+        } else {
             lassoDrawSamples.clear()
             lassoDrawSamples.add(start)
         }
@@ -547,7 +547,7 @@ class EditorActivity : ComponentActivity() {
         backend.presentDuringCapture(scratch)
     }
 
-    /** Presents the page with the in-progress lasso outline (wet-ink-less backends only). */
+    /** Presents the page with the in-progress lasso outline (a dashed polyline over the composite). */
     private fun presentLassoDraw() {
         val scratch = decorationScratch() ?: return
         val canvas = Canvas(scratch)
