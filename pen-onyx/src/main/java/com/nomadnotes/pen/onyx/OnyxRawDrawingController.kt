@@ -289,12 +289,14 @@ class OnyxRawDrawingController(
         private const val DEFAULT_MAX_PRESSURE = 4096f
 
         /**
-         * Waveform for a repaint that removes ink (see [renderToScreen]'s `clean`). REGAL is Onyx's
-         * anti-ghost mode: it clears the erased strokes without the full-screen flash a GC refresh
-         * would cause. Tune here if erased ink still ghosts (try [UpdateMode.GC] for a full clear) or
-         * flashes too much.
+         * Waveform for a repaint that removes ink (see [renderToScreen]'s `clean`). GC is a full
+         * grayscale-clear: it refreshes the whole panel so no erased stroke is left ghosted. The
+         * lighter anti-ghost modes (REGAL/GC4) accumulate ghost residue over a few erases — the just-
+         * erased stroke and the last few before it "blink" back until the panel forces a full refresh
+         * — so a full clear is used despite its brief flash. Tune here if the flash is too heavy (try
+         * [UpdateMode.GC4] for a lighter clear that may reintroduce some ghosting).
          */
-        private val ERASE_CLEAN_UPDATE_MODE = UpdateMode.REGAL
+        private val ERASE_CLEAN_UPDATE_MODE = UpdateMode.GC
 
         /** Onyx Boox hardware reports "ONYX" as the manufacturer; only there is raw drawing real. */
         fun isBooxDevice(): Boolean = Build.MANUFACTURER.equals("ONYX", ignoreCase = true)
