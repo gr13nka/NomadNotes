@@ -81,9 +81,21 @@ class OnyxPenBackend(
     }
 
     override fun setEnabled(enabled: Boolean) {
+        val wasEnabled = this.enabled
         this.enabled = enabled
         val controller = controller ?: return
-        if (enabled) controller.resume() else controller.pause()
+        if (enabled) {
+            controller.resume()
+        } else {
+            // A finished stroke shows only as the panel's ephemeral wet ink on this backend (the
+            // editor skips the per-stroke present because rendersWetInkNatively). Pausing raw drawing
+            // makes the panel refresh from the surface buffer, which clears that wet ink — so blit the
+            // committed composite first, or the just-drawn strokes vanish when capture is paused (on a
+            // tool switch, an opening panel, or backgrounding). Only on the enabled→disabled edge; a
+            // repeat disable has already persisted them.
+            if (wasEnabled) controller.renderToScreen(currentComposite())
+            controller.pause()
+        }
     }
 
     override fun setExcludeRects(rects: List<Rect>) {
