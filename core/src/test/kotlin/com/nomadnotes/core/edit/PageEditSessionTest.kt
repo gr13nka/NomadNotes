@@ -88,6 +88,13 @@ class PageEditSessionTest {
     }
 
     @Test
+    fun `pasteStrokes of an empty list into a missing layer returns false without throwing`() {
+        // The empty-list check runs before the layer is validated, so an empty paste is a total
+        // no-op even when the target layer is gone (a stale selection's layer, say).
+        assertFalse(session.pasteStrokes(LayerId("nope"), emptyList()))
+    }
+
+    @Test
     fun `pasteStrokes of an empty list is a no-op that leaves history untouched`() {
         session.addStroke(mainLayer, stroke("a"))
         session.undo()

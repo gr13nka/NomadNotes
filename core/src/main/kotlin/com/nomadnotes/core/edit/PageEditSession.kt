@@ -44,15 +44,16 @@ class PageEditSession(initialPage: Page) {
     /**
      * Appends [strokes] on top of the given layer as one undoable step, so a single undo removes
      * exactly the strokes this call added (and a redo re-inserts them). Used to paste a lassoed
-     * selection. Returns false without changing anything when [strokes] is empty; throws if the
-     * layer is not on the page (consistent with [addStroke]).
+     * selection. Returns false without changing anything when [strokes] is empty — an empty paste
+     * is a total no-op, checked before the layer, so it never throws. Otherwise throws if the layer
+     * is not on the page (consistent with [addStroke]).
      *
      * The caller owns identity: paste distinct [Stroke]s (fresh ids) if the originals are still on
      * the page, or the inverse would remove both copies.
      */
     fun pasteStrokes(layerId: LayerId, strokes: List<Stroke>): Boolean {
-        val layer = page.layerOrThrow(layerId)
         if (strokes.isEmpty()) return false
+        val layer = page.layerOrThrow(layerId)
         val base = layer.strokes.size
         val entries = strokes.mapIndexed { offset, stroke -> PositionedStroke(base + offset, stroke) }
         commit(InsertStrokes(layerId, entries))
