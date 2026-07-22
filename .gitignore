@@ -10,5 +10,8 @@ captures/
 *.apk
 *.aab
 
+# Kotlin compiler build cache (Kotlin 2.x), machine-local.
+.kotlin/
+
 # Serena project state — machine-local, not part of the project.
 .serena/

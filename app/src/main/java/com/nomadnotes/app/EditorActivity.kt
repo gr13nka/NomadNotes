@@ -243,6 +243,10 @@ class EditorActivity : ComponentActivity() {
         pendingChromeReenable?.let { surfaceView.removeCallbacks(it) }
         pendingChromeReenable = null
         backend.setEnabled(false)
+        // A lasso gesture still in flight when we background is dropped without a finishing callback
+        // (disabling capture resets the collector), so clear its live-preview state now — otherwise the
+        // next gesture would resume from it as a stale drag of the old selection from the old start.
+        endLassoPreview()
         super.onPause()
         // onPause can be the last callback before the process is killed, so persist synchronously:
         // cancel the pending debounce, then block on the final save so it lands before we return.
@@ -315,9 +319,12 @@ class EditorActivity : ComponentActivity() {
             surfaceWidth = width
             surfaceHeight = height
             renderer.resize(width, height)
-            // The decoration scratch is surface-sized; drop it so it is rebuilt at the new size.
+            // The decoration and drag-base scratches are surface-sized; drop them so they are rebuilt
+            // at the new size (a resize mid-drag would otherwise blit through a wrong-sized base).
             decorationBitmap?.recycle()
             decorationBitmap = null
+            dragBaseBitmap?.recycle()
+            dragBaseBitmap = null
             surfaceReady = true
             startEditingIfReady()
         }
@@ -899,7 +906,7 @@ class EditorActivity : ComponentActivity() {
         )
         if (rect == toolbarExcludeRect) return
         toolbarExcludeRect = rect
-        Log.i(TAG, "Toolbar exclude rect: $rect")
+        Log.d(TAG, "Toolbar exclude rect: $rect")
         backend.setExcludeRects(listOf(rect))
     }
 

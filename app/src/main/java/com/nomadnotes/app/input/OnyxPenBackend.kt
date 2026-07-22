@@ -181,7 +181,10 @@ class OnyxPenBackend(
             surfaceView.setOnTouchListener { _, event -> lassoCollector.onTouch(event) }
         } else {
             surfaceView.setOnTouchListener(null)
-            lassoCollector.reset()
+            // Tearing the listener down mid-gesture drops a lasso the touch stream will never finish;
+            // report it as an empty (cancelled) gesture so the editor restores the page and clears its
+            // live-preview state, rather than leaking a stale drag into the next gesture.
+            lassoCollector.reset(notifyCancel = true)
         }
     }
 

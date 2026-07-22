@@ -81,18 +81,25 @@ class GestureCollector(
             if (!capturing) {
                 false
             } else {
-                reset()
-                onCancelled()
+                reset(notifyCancel = true)
                 true
             }
         }
         else -> false
     }
 
-    /** Drops any in-progress gesture without reporting it (e.g. when capture is disabled). */
-    fun reset() {
+    /**
+     * Drops any in-progress gesture. When [notifyCancel] is set and a gesture was actually in
+     * progress, it is reported as cancelled through [onCancelled] (exactly as an ACTION_CANCEL would),
+     * so a caller that tears capture down mid-gesture — disabled, detached, or its touch listener
+     * removed, with no ACTION_UP/ACTION_CANCEL still coming — can undo a half-drawn preview. Without
+     * it, or with no gesture in progress, the drop is silent.
+     */
+    fun reset(notifyCancel: Boolean = false) {
+        val wasCapturing = capturing
         capturing = false
         points.clear()
+        if (notifyCancel && wasCapturing) onCancelled()
     }
 
     private fun isStylus(event: MotionEvent): Boolean = when (event.getToolType(0)) {
