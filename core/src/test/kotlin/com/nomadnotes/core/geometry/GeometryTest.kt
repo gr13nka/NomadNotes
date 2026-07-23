@@ -1,5 +1,6 @@
 package com.nomadnotes.core.geometry
 
+import com.nomadnotes.core.LinkRegion
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import com.nomadnotes.core.StrokePoint
@@ -105,5 +106,50 @@ class GeometryTest {
     fun `lasso never selects an empty stroke`() {
         val empty = strokeOf("empty")
         assertEquals(emptyList<StrokeId>(), lassoSelect(listOf(empty), square))
+    }
+
+    // --- lassoCoversRegion -----------------------------------------------------------------
+
+    @Test
+    fun `lassoCoversRegion is true when the region center is inside the polygon`() {
+        // The square encloses the region, so its centre (5,5) reads as circled.
+        val region = LinkRegion(3f, 3f, 7f, 7f)
+        assertTrue(lassoCoversRegion(region, square))
+    }
+
+    @Test
+    fun `lassoCoversRegion is false when the polygon only clips a corner`() {
+        // The square overlaps the region's lower-left corner, but the region's centre (14,14)
+        // is outside the square, so the link is not circled.
+        val region = LinkRegion(8f, 8f, 20f, 20f)
+        assertFalse(lassoCoversRegion(region, square))
+    }
+
+    @Test
+    fun `lassoCoversRegion is false for a polygon with fewer than three vertices`() {
+        val region = LinkRegion(3f, 3f, 7f, 7f)
+        val degenerate = listOf(Vec2(0f, 0f), Vec2(10f, 10f))
+        assertFalse(lassoCoversRegion(region, degenerate))
+    }
+
+    // --- pointInPolygon --------------------------------------------------------------------
+
+    @Test
+    fun `pointInPolygon is true for a point well inside the polygon`() {
+        assertTrue(pointInPolygon(5f, 5f, square))
+    }
+
+    @Test
+    fun `pointInPolygon is false for a point outside the polygon`() {
+        assertFalse(pointInPolygon(15f, 5f, square))
+    }
+
+    @Test
+    fun `pointInPolygon treats edges as half-open`() {
+        // Ray-casting containment is half-open: a point on the polygon's lower-y edge counts as
+        // inside, while the upper-y edge counts as outside. This pins the boundary behaviour
+        // inherited from lassoSelect; exact-boundary and on-vertex cases stay unspecified.
+        assertTrue(pointInPolygon(5f, 0f, square)) // y = 0 edge: inside
+        assertFalse(pointInPolygon(5f, 10f, square)) // y = 10 edge: outside
     }
 }

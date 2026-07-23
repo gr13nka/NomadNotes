@@ -1,15 +1,18 @@
 package com.nomadnotes.core.geometry
 
+import com.nomadnotes.core.LinkRegion
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import kotlin.math.sqrt
 
 /**
- * Pure hit-testing over strokes: no model is mutated, results are just booleans and id lists.
+ * Pure hit-testing over strokes and regions: no model is mutated, results are just booleans and
+ * id lists.
  *
- * The two entry points implement the two selection gestures of the app:
+ * The entry points implement the selection gestures of the app:
  *  - [eraserHit] — the stroke-eraser: does a circular eraser touch a stroke at all?
  *  - [lassoSelect] — the lasso: which strokes lie *entirely* within a drawn region?
+ *  - [lassoCoversRegion] — the lasso again: does a drawn region circle a link's area?
  */
 
 /**
@@ -61,6 +64,19 @@ fun lassoSelect(strokes: List<Stroke>, polygon: List<Vec2>): List<StrokeId> {
 }
 
 /**
+ * True when [polygon] "circles" the link occupying [region] — the v1 criterion for the
+ * lasso-to-link gesture: the region's centre must lie inside the polygon. This is deliberately
+ * simpler than area overlap, so a lasso that merely clips a corner of the region does not count.
+ *
+ * As with [lassoSelect], [polygon] is treated as a closed loop, and a polygon with fewer than
+ * three vertices circles nothing.
+ */
+fun lassoCoversRegion(region: LinkRegion, polygon: List<Vec2>): Boolean {
+    if (polygon.size < 3) return false
+    return pointInPolygon(region.centerX, region.centerY, polygon)
+}
+
+/**
  * Shortest distance from point `p` to the segment `a`-`b`. When the segment is degenerate
  * (`a` == `b`) this is just the distance to that shared endpoint.
  */
@@ -80,12 +96,15 @@ private fun distanceToSegment(p: Vec2, ax: Float, ay: Float, bx: Float, by: Floa
 }
 
 /**
- * Even-odd ray-casting containment: casts a ray from the point and counts polygon edge
- * crossings. The polygon is implicitly closed by pairing each vertex with the previous one,
- * starting from the last, so the first-to-last edge is included without the caller repeating a
- * vertex.
+ * Even-odd ray-casting containment, shared by both lasso operations ([lassoSelect] and
+ * [lassoCoversRegion]): casts a ray from the point and counts polygon edge crossings. The
+ * polygon is implicitly closed by pairing each vertex with the previous one, starting from the
+ * last, so the first-to-last edge is included without the caller repeating a vertex.
+ *
+ * Boundary points are half-open — a point exactly on an edge may read as inside or outside
+ * depending on the edge — so callers must not rely on exact-boundary results.
  */
-private fun pointInPolygon(px: Float, py: Float, polygon: List<Vec2>): Boolean {
+internal fun pointInPolygon(px: Float, py: Float, polygon: List<Vec2>): Boolean {
     var inside = false
     var previous = polygon.size - 1
     for (current in polygon.indices) {

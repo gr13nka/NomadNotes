@@ -5,6 +5,9 @@ import kotlinx.serialization.Serializable
 /**
  * Axis-aligned rectangle in page coordinates. A link's tappable area — fixed at
  * creation time (selection bbox + padding); moving strokes does not move it.
+ *
+ * Assumed well-formed (`left <= right`, `top <= bottom`); like the other model types it is not
+ * validated, so callers must construct it in that order.
  */
 @Serializable
 data class LinkRegion(
