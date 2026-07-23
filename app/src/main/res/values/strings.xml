@@ -42,6 +42,10 @@
     <string name="link_picker_current">%1$s (this notebook)</string>
     <string name="link_picker_back">Back</string>
 
+    <!-- Editor: broken link -->
+    <string name="broken_link_title">Broken link</string>
+    <string name="broken_link_message">Target not found. Delete this link?</string>
+
     <!-- Editor: nib width presets -->
     <string name="width_small">S</string>
     <string name="width_medium">M</string>
@@ -62,6 +66,7 @@
     <string name="action_clear">Clear</string>
 
     <!-- Editor: page navigation -->
+    <string name="nav_jump_back">←</string>
     <string name="nav_prev">◀</string>
     <string name="nav_next">▶</string>
     <string name="page_position">%1$d/%2$d</string>

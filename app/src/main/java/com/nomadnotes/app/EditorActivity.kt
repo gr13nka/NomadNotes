@@ -46,6 +46,7 @@ import androidx.lifecycle.lifecycleScope
 import com.nomadnotes.R
 import com.nomadnotes.app.editor.SelectionBounds
 import com.nomadnotes.app.editor.SelectionState
+import com.nomadnotes.app.editor.TapClassifier
 import com.nomadnotes.app.input.AndroidPenBackend
 import com.nomadnotes.app.input.CaptureMode
 import com.nomadnotes.app.input.OnyxPenBackend
@@ -122,6 +123,14 @@ private data class LinkPickerState(
     val notebooks: List<Notebook>? = null,
     val chosenNotebook: Notebook? = null,
 )
+
+/**
+ * A position a link jump departed from, so the step-back can return to it. Held by notebook *name*
+ * (not id) and page id: the jump stack is in-memory only and dies with the process, so within one
+ * session the directory name is a stable enough handle and lets the return load the notebook back
+ * by name.
+ */
+private data class JumpOrigin(val notebookName: String, val pageId: PageId)
 
 /** Dims the screen behind an open panel and captures taps to dismiss it; no fade, instant. */
 private val ScrimColor = Color(0x33000000)
@@ -230,6 +239,17 @@ class EditorActivity : ComponentActivity() {
     private var uiSelectionOnMainLayer by mutableStateOf(false)
     private var uiClipboardHasContent by mutableStateOf(false)
     private var uiLinkPicker by mutableStateOf<LinkPickerState?>(null)
+
+    // The broken link awaiting the "delete or cancel" dialog, or null when none is up. Set when a
+    // tapped link resolves to a missing notebook or a missing page; the dialog offers to remove it.
+    private var uiBrokenLinkDialog by mutableStateOf<PageLink?>(null)
+
+    // Where past link jumps departed from, most recent last, so the toolbar "←" steps back through
+    // them one at a time (Supernote-style). In-memory only — never persisted, never cleared by manual
+    // page navigation — and capped at MAX_JUMP_STACK, dropping the oldest. `uiJumpDepth` mirrors its
+    // size for the back button's visibility, updated on every push and pop.
+    private val jumpStack = ArrayDeque<JumpOrigin>()
+    private var uiJumpDepth by mutableStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -449,6 +469,16 @@ class EditorActivity : ComponentActivity() {
         override fun onStrokeFinished(points: List<StrokePoint>) {
             val session = session ?: return
             if (points.isEmpty()) return
+            // A tap on a link navigates instead of inking. Only in INK mode (ERASE/LASSO gestures
+            // arrive on other callbacks), and only for a real tap on a link region; anything else
+            // falls through to the ordinary ink path below unchanged.
+            if (backend.captureMode == CaptureMode.INK && TapClassifier.isTap(points)) {
+                val link = linkAt(session, points.first())
+                if (link != null) {
+                    navigateToLink(link)
+                    return
+                }
+            }
             val layerId = activeLayerId(session)
             val stroke = Stroke(
                 id = StrokeId.random(),
@@ -1025,18 +1055,32 @@ class EditorActivity : ComponentActivity() {
     private fun goToPage(index: Int) {
         val notebook = notebook ?: return
         if (index < 0 || index >= notebook.pageIds.size || index == uiPageIndex) return
+        switchNotebook(notebook, notebook.pageIds[index])
+    }
+
+    /**
+     * Flushes the current page to its own notebook, then loads and installs [pageId] of [target],
+     * switching the active notebook when [target] differs from the current one. The single page-load
+     * primitive: [goToPage] is the same-notebook case routed through here, and a cross-notebook link
+     * jump (or step-back) is the differing-notebook case — no Activity restart either way. A load
+     * failure is logged and the current page left in place.
+     */
+    private fun switchNotebook(target: Notebook, pageId: PageId) {
+        val index = target.pageIds.indexOf(pageId)
+        if (index < 0) return
         autosaveJob?.cancel()
         lifecycleScope.launch {
             saveCurrentPage()
             val loaded = withContext(Dispatchers.IO) {
-                runCatching { storage.loadPage(notebook, notebook.pageIds[index]) }
+                runCatching { storage.loadPage(target, pageId) }
             }
             loaded
                 .onSuccess { page ->
+                    notebook = target
                     installPage(page, index)
                     renderPage()
                 }
-                .onFailure { e -> Log.e(TAG, "Could not load page $index", e) }
+                .onFailure { e -> Log.e(TAG, "Could not load ${target.name} page $index", e) }
         }
     }
 
@@ -1096,6 +1140,106 @@ class EditorActivity : ComponentActivity() {
                 }
                 .onFailure { e -> Log.e(TAG, "Could not delete the page", e) }
         }
+    }
+
+    // --- link navigation -------------------------------------------------------------------
+
+    /**
+     * The link whose region contains ([point]), or null. Hit-tested only while the main layer is
+     * visible, since a link binds to that layer's handwriting — hiding the layer hides its links too.
+     * The first match wins; overlapping regions are a documented degenerate case (see [Page.links]).
+     */
+    private fun linkAt(session: PageEditSession, point: StrokePoint): PageLink? {
+        val page = session.page
+        val mainVisible = page.layers.first { it.id == page.mainLayerId }.visible
+        if (!mainVisible) return null
+        return page.links.firstOrNull { it.region.contains(point.x, point.y) }
+    }
+
+    /**
+     * Follows a tapped [link]: resolves its target notebook by id off the main thread, then either
+     * offers to remove a broken link (its notebook or page is gone) or records the current position
+     * on the jump stack and jumps to the target. The jump's full render clears the wet tap dot the
+     * pen left on the panel; the jump is wrapped in [withChromeRefresh] so the page-counter repaint
+     * reaches the e-ink panel (this runs from a pen tap, not a toolbar tap, so it wraps itself).
+     */
+    private fun navigateToLink(link: PageLink) {
+        lifecycleScope.launch {
+            val target = withContext(Dispatchers.IO) {
+                runCatching { storage.findNotebookById(link.targetNotebookId) }.getOrNull()
+            }
+            if (target == null || link.targetPageId !in target.pageIds) {
+                uiBrokenLinkDialog = link
+                return@launch
+            }
+            pushJumpOrigin()
+            withChromeRefresh { jumpTo(target, link.targetPageId) }
+        }
+    }
+
+    /**
+     * Jumps to [pageId] of [target], the machinery shared by a link tap and the step-back:
+     *  - same notebook, another page → [goToPage] (flush, load, install);
+     *  - same notebook, the current page → a plain repaint that keeps the session (and its undo
+     *    history) and clears the wet tap dot — a link may legitimately target its own page;
+     *  - a different notebook → [switchNotebook].
+     */
+    private fun jumpTo(target: Notebook, pageId: PageId) {
+        val current = notebook
+        if (current != null && target.id == current.id) {
+            val index = target.pageIds.indexOf(pageId)
+            when {
+                index < 0 -> Unit
+                index == uiPageIndex -> renderPage()
+                else -> goToPage(index)
+            }
+        } else {
+            switchNotebook(target, pageId)
+        }
+    }
+
+    /** Records the current position as a jump origin, capped at [MAX_JUMP_STACK] (oldest dropped). */
+    private fun pushJumpOrigin() {
+        val notebook = notebook ?: return
+        val page = session?.page ?: return
+        jumpStack.addLast(JumpOrigin(notebook.name, page.id))
+        while (jumpStack.size > MAX_JUMP_STACK) jumpStack.removeFirst()
+        uiJumpDepth = jumpStack.size
+    }
+
+    /**
+     * Steps back to the most recently recorded jump origin and, crucially, does NOT push one (so
+     * repeated presses walk the stack down instead of ping-ponging). A same-notebook origin jumps
+     * straight there; an origin in another notebook is loaded by name first (the stack holds names,
+     * still current within the session). A failed load is logged, not fatal.
+     */
+    private fun jumpBack() {
+        val origin = jumpStack.removeLastOrNull() ?: return
+        uiJumpDepth = jumpStack.size
+        val current = notebook
+        if (current != null && origin.notebookName == current.name) {
+            jumpTo(current, origin.pageId)
+            return
+        }
+        lifecycleScope.launch {
+            val target = withContext(Dispatchers.IO) {
+                runCatching { storage.loadNotebook(origin.notebookName) }.getOrNull()
+            }
+            if (target == null) {
+                Log.e(TAG, "Could not load origin notebook ${origin.notebookName}")
+                return@launch
+            }
+            jumpTo(target, origin.pageId)
+        }
+    }
+
+    /** Removes the broken [link] and repaints so its affordance disappears (single-present tail). */
+    private fun deleteBrokenLink(link: PageLink) {
+        val session = session ?: return
+        session.removeLink(link.id)
+        refreshUndoRedo()
+        renderPage()
+        scheduleAutosave()
     }
 
     // --- autosave --------------------------------------------------------------------------
@@ -1228,6 +1372,10 @@ class EditorActivity : ComponentActivity() {
                 EinkToggle(stringResource(R.string.action_template), selected = uiTemplateOpen) { toggleTemplatePanel() }
                 ToolbarDivider()
 
+                // The step-back through link jumps, shown only when there is somewhere to step back to.
+                if (uiJumpDepth > 0) {
+                    EinkButton(stringResource(R.string.nav_jump_back)) { withChromeRefresh { jumpBack() } }
+                }
                 EinkButton(stringResource(R.string.nav_prev), enabled = uiPageIndex > 0) { withChromeRefresh { goToPage(uiPageIndex - 1) } }
                 Text(
                     stringResource(R.string.page_position, uiPageIndex + 1, uiPageCount),
@@ -1274,6 +1422,19 @@ class EditorActivity : ComponentActivity() {
                     withChromeRefresh { deleteCurrentPage() }
                 },
                 onDismiss = { uiDeletePageDialog = false },
+            )
+        }
+        uiBrokenLinkDialog?.let { link ->
+            ConfirmDialog(
+                title = stringResource(R.string.broken_link_title),
+                message = stringResource(R.string.broken_link_message),
+                confirmLabel = stringResource(R.string.action_delete),
+                cancelLabel = stringResource(R.string.action_cancel),
+                onConfirm = {
+                    uiBrokenLinkDialog = null
+                    withChromeRefresh { deleteBrokenLink(link) }
+                },
+                onDismiss = { uiBrokenLinkDialog = null },
             )
         }
     }
@@ -1439,6 +1600,9 @@ class EditorActivity : ComponentActivity() {
          * pixels on each side, so the affordance frames the circled handwriting rather than clipping it.
          */
         private const val LINK_REGION_PADDING_PX = 8f
+
+        /** How many jump origins the step-back stack keeps; past this the oldest is dropped. */
+        private const val MAX_JUMP_STACK = 20
 
         /** Image extensions offered as user templates from the `templates/` directory. */
         private val TEMPLATE_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "bmp")

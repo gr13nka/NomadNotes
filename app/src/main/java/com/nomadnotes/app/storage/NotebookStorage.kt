@@ -117,10 +117,7 @@ class NotebookStorage(private val rootDir: File) {
      * the directory name — the authoritative name — but never the id). Scans [listNotebooks] and
      * reads each candidate's [loadNotebook] for its id, stopping at the first match; an unreadable
      * notebook is skipped rather than thrown, so one corrupt notebook cannot break resolution of the
-     * rest.
-     *
-     * Unwired until link navigation lands (the next task): a tapped link resolves its target notebook
-     * through here before jumping. Exercised by tests until then.
+     * rest. A tapped link resolves its target notebook through here before jumping.
      */
     fun findNotebookById(id: NotebookId): Notebook? {
         for (ref in listNotebooks()) {
