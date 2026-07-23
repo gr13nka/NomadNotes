@@ -81,6 +81,7 @@ import com.nomadnotes.core.Tool
 import com.nomadnotes.core.edit.PageEditSession
 import com.nomadnotes.core.geometry.Vec2
 import com.nomadnotes.core.geometry.eraserHit
+import com.nomadnotes.core.geometry.lassoCoversRegion
 import com.nomadnotes.core.geometry.lassoSelect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -103,10 +104,9 @@ private data class LayerRow(val id: LayerId, val name: String, val visible: Bool
 /**
  * What the target picker does once a page is chosen.
  *
- * [Create] attaches a fresh link over a just-lassoed region; [EditTarget] retargets an existing
- * link. Only [Create] is wired today. [EditTarget] is the entry point for editing a circled link
- * (a later task); it is defined here so the picker is built once around both modes, but no UI opens
- * it yet.
+ * [Create] attaches a fresh link over a just-lassoed region; [EditTarget] retargets the link the
+ * user circled with the lasso. The picker is built once around both modes and drives them through
+ * the same two-step notebook/page flow.
  */
 private sealed interface LinkPickerMode {
     data class Create(val bounds: SelectionBounds) : LinkPickerMode
@@ -239,6 +239,11 @@ class EditorActivity : ComponentActivity() {
     private var uiSelectionOnMainLayer by mutableStateOf(false)
     private var uiClipboardHasContent by mutableStateOf(false)
     private var uiLinkPicker by mutableStateOf<LinkPickerState?>(null)
+
+    // The link the last lasso circled (its region centre enclosed), or null. Drives the "Edit link"/
+    // "Delete link" actions in the selection bar; independent of any stroke selection the same circle
+    // made, so both sets of actions can show at once. Cleared by [clearSelection] (and tool switches).
+    private var uiCircledLink by mutableStateOf<LinkId?>(null)
 
     // The broken link awaiting the "delete or cancel" dialog, or null when none is up. Set when a
     // tapped link resolves to a missing notebook or a missing page; the dialog offers to remove it.
@@ -676,12 +681,19 @@ class EditorActivity : ComponentActivity() {
         }
     }
 
-    /** Selects every active-layer stroke fully enclosed by [polygon]; an empty result clears the selection. */
+    /**
+     * Acts on a new lasso [polygon]: selects every active-layer stroke it fully encloses, and — as an
+     * independent outcome — marks the link it circles (if any) for the edit/delete actions. A circle
+     * can do both, one, or neither. A circle that catches no strokes still clears the stroke selection
+     * but keeps any circled link, so a link-only circle is possible (the link's affordance is already
+     * on the page, so no decoration is needed for it).
+     */
     private fun applyLasso(polygon: List<Vec2>) {
         val session = session ?: return
         val layerId = activeLayerId(session)
         val layer = session.page.layers.first { it.id == layerId }
         val ids = lassoSelect(layer.strokes, polygon).toSet()
+        uiCircledLink = circledLinkId(session, polygon)
         if (ids.isEmpty()) {
             selection = null
             selectionPolygon = null
@@ -765,6 +777,9 @@ class EditorActivity : ComponentActivity() {
         val had = selection != null
         selection = null
         selectionPolygon = null
+        // A circled link is part of the same lasso outcome as the selection, so it clears with it —
+        // which is how a tool switch (routing through here) drops the circle's edit/delete actions.
+        uiCircledLink = null
         // The picker is anchored to a selection, so clearing the selection dismisses it — this is how
         // a tool switch (which routes through here) also closes it. The picker's own scrim blocks the
         // toolbar while it is open, so this never runs with the picker actually up, and the backend
@@ -834,8 +849,10 @@ class EditorActivity : ComponentActivity() {
 
     /** A page was chosen in the picker: act on it per the picker's mode, then close and repaint. */
     private fun confirmLinkTarget(picker: LinkPickerState, targetNotebook: Notebook, targetPageId: PageId) {
-        val mode = picker.mode
-        if (mode is LinkPickerMode.Create) createLink(mode.bounds, targetNotebook, targetPageId)
+        when (val mode = picker.mode) {
+            is LinkPickerMode.Create -> createLink(mode.bounds, targetNotebook, targetPageId)
+            is LinkPickerMode.EditTarget -> retargetLink(mode.linkId, targetNotebook, targetPageId)
+        }
     }
 
     /**
@@ -862,6 +879,54 @@ class EditorActivity : ComponentActivity() {
         renderPage()
         scheduleAutosave()
         updateBackendEnabled()
+    }
+
+    /**
+     * Opens the target picker to retarget the circled link. The circled id can be stale — the link may
+     * have been undone since it was circled — so a link that no longer exists just clears the circle
+     * instead of opening the picker onto nothing.
+     */
+    private fun editCircledLink() {
+        val session = session ?: return
+        val id = uiCircledLink ?: return
+        if (session.page.links.none { it.id == id }) {
+            uiCircledLink = null
+            return
+        }
+        openLinkPicker(LinkPickerMode.EditTarget(id))
+    }
+
+    /**
+     * Retargets the circled link to ([targetNotebook], [targetPageId]) and repaints with the same
+     * single-present tail as [createLink], restoring pen capture last (the picker had suppressed it).
+     * Only the link is touched: any stroke selection made by the same circle is left intact. A link
+     * gone since the picker opened makes [PageEditSession.setLinkTarget] a no-op; the tail still tidies.
+     */
+    private fun retargetLink(linkId: LinkId, targetNotebook: Notebook, targetPageId: PageId) {
+        val session = session ?: return
+        session.setLinkTarget(linkId, targetNotebook.id, targetPageId)
+        uiCircledLink = null
+        uiLinkPicker = null
+        refreshUndoRedo()
+        renderPage()
+        scheduleAutosave()
+        updateBackendEnabled()
+    }
+
+    /**
+     * Removes the circled link and repaints so its affordance disappears (the single-present tail).
+     * Only the link is touched; any stroke selection stays. The circled id can be stale (the link was
+     * undone while circled), so a [PageEditSession.removeLink] that finds nothing just clears the
+     * circle without a redundant repaint or save.
+     */
+    private fun deleteCircledLink() {
+        val session = session ?: return
+        val id = uiCircledLink ?: return
+        uiCircledLink = null
+        if (!session.removeLink(id)) return
+        refreshUndoRedo()
+        renderPage()
+        scheduleAutosave()
     }
 
     // --- toolbar actions -------------------------------------------------------------------
@@ -930,9 +995,11 @@ class EditorActivity : ComponentActivity() {
         }
         uiTemplateRef = session.page.templateRef
         // A structural edit (undo/redo, layer/template change) can invalidate the selection's ids or
-        // bounds, so drop it; renderPage then repaints without decorations.
+        // bounds, so drop it; renderPage then repaints without decorations. The circled link is dropped
+        // for the same reason — the edit may remove or hide it, which would strand its edit/delete actions.
         selection = null
         selectionPolygon = null
+        uiCircledLink = null
         updateSelectionUi()
         refreshUndoRedo()
         refreshLayers()
@@ -1146,15 +1213,32 @@ class EditorActivity : ComponentActivity() {
 
     /**
      * The link whose region contains ([point]), or null. Hit-tested only while the main layer is
-     * visible, since a link binds to that layer's handwriting — hiding the layer hides its links too.
-     * The first match wins; overlapping regions are a documented degenerate case (see [Page.links]).
+     * visible (see [mainLayerVisible]). The first match wins; overlapping regions are a documented
+     * degenerate case (see [Page.links]).
      */
     private fun linkAt(session: PageEditSession, point: StrokePoint): PageLink? {
         val page = session.page
-        val mainVisible = page.layers.first { it.id == page.mainLayerId }.visible
-        if (!mainVisible) return null
+        if (!mainLayerVisible(page)) return null
         return page.links.firstOrNull { it.region.contains(point.x, point.y) }
     }
+
+    /**
+     * The id of the first link [polygon] circles (its region centre enclosed by [lassoCoversRegion]),
+     * or null. Gated on the main layer being visible, exactly like the tap hit-test ([linkAt]), since
+     * a link binds to that layer's handwriting.
+     */
+    private fun circledLinkId(session: PageEditSession, polygon: List<Vec2>): LinkId? {
+        val page = session.page
+        if (!mainLayerVisible(page)) return null
+        return page.links.firstOrNull { lassoCoversRegion(it.region, polygon) }?.id
+    }
+
+    /**
+     * Whether [page]'s main layer is currently visible — the gate both link hit-tests share, since a
+     * link is bound to the main layer's handwriting and a hidden layer hides its links along with it.
+     */
+    private fun mainLayerVisible(page: Page): Boolean =
+        page.layers.first { it.id == page.mainLayerId }.visible
 
     /**
      * Follows a tapped [link]: resolves its target notebook by id off the main thread, then either
@@ -1337,7 +1421,7 @@ class EditorActivity : ComponentActivity() {
                 EinkToggle(stringResource(R.string.action_lasso), selected = uiLasso) { withChromeRefresh { selectLasso() } }
                 // The selection action bar lives in the toolbar so its buttons sit in the already-excluded
                 // strip (no dynamic raw-drawing exclude rect) and appearing does not resize the canvas.
-                if (uiHasSelection || uiClipboardHasContent) {
+                if (uiHasSelection || uiCircledLink != null || uiClipboardHasContent) {
                     ToolbarDivider()
                     if (uiHasSelection) {
                         EinkButton(stringResource(R.string.action_copy)) { withChromeRefresh { copySelection() } }
@@ -1347,6 +1431,11 @@ class EditorActivity : ComponentActivity() {
                             EinkButton(stringResource(R.string.action_link)) { withChromeRefresh { openLinkPickerForSelection() } }
                         }
                         EinkButton(stringResource(R.string.action_deselect)) { withChromeRefresh { clearSelection() } }
+                    }
+                    // Shown whenever a lasso circled a link, whether or not it also caught strokes.
+                    if (uiCircledLink != null) {
+                        EinkButton(stringResource(R.string.action_edit_link)) { withChromeRefresh { editCircledLink() } }
+                        EinkButton(stringResource(R.string.action_delete_link)) { withChromeRefresh { deleteCircledLink() } }
                     }
                     if (uiClipboardHasContent) {
                         EinkButton(stringResource(R.string.action_paste)) { withChromeRefresh { pasteClipboard() } }

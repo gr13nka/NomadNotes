@@ -36,6 +36,8 @@
     <string name="action_paste">Paste</string>
     <string name="action_deselect">Deselect</string>
     <string name="action_link">Link</string>
+    <string name="action_edit_link">Edit link</string>
+    <string name="action_delete_link">Delete link</string>
 
     <!-- Editor: link target picker -->
     <string name="link_picker_title">Link to page</string>
