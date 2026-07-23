@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.PorterDuff
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.Page
+import com.nomadnotes.core.PageLink
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 
@@ -31,6 +32,7 @@ import com.nomadnotes.core.StrokeId
 class PageRenderer {
 
     private val strokeRenderer = StrokeRenderer()
+    private val linkRenderer = LinkRenderer()
 
     // One cached bitmap per layer, keyed by id; composite order is not this map's order but [layers].
     private val layerBitmaps = HashMap<LayerId, Bitmap>()
@@ -46,6 +48,12 @@ class PageRenderer {
     // referenced here — its bitmap is owned by the caller (a TemplateResolver), so this class never
     // recycles it.
     private var templateBitmap: Bitmap? = null
+
+    // The page's link affordances, drawn over the ink by [recomposite], and whether the main layer
+    // they annotate is visible (their gate). Captured by each [renderFull] so [recomposite] — also
+    // reached by [appendStroke], which is not handed the page — can redraw them without it.
+    private var links: List<PageLink> = emptyList()
+    private var mainLayerVisible = false
 
     private var width = 0
     private var height = 0
@@ -89,6 +97,8 @@ class PageRenderer {
             for (stroke in strokesToDraw(layer.strokes, excludeStrokeIds)) strokeRenderer.draw(canvas, stroke)
         }
         layers = page.layers.map { LayerSlot(it.id, it.visible) }
+        links = page.links
+        mainLayerVisible = page.layers.first { it.id == page.mainLayerId }.visible
         recomposite()
     }
 
@@ -126,6 +136,9 @@ class PageRenderer {
             val bitmap = layerBitmaps[slot.id] ?: continue
             canvas.drawBitmap(bitmap, 0f, 0f, null)
         }
+        // Affordances go on top of every layer, and only while the main layer that carries the
+        // circled handwriting is showing — hide that layer and its buttons go with it.
+        if (mainLayerVisible) linkRenderer.draw(canvas, links)
     }
 
     private fun dropCachesForRemovedLayers(page: Page) {
@@ -147,6 +160,8 @@ class PageRenderer {
         layerBitmaps.values.forEach { it.recycle() }
         layerBitmaps.clear()
         layers = emptyList()
+        links = emptyList()
+        mainLayerVisible = false
         // Only drop the reference: the template bitmap is the caller's to recycle (see the field).
         templateBitmap = null
         compositeBitmap?.recycle()
