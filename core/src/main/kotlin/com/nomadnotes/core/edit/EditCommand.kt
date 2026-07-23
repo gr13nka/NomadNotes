@@ -2,7 +2,11 @@ package com.nomadnotes.core.edit
 
 import com.nomadnotes.core.Layer
 import com.nomadnotes.core.LayerId
+import com.nomadnotes.core.LinkId
+import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
+import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageLink
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import com.nomadnotes.core.StrokePoint
@@ -15,11 +19,13 @@ import com.nomadnotes.core.StrokePoint
  * to compute an inverse itself or snapshot whole pages — it keeps the returned inverse, and
  * because that inverse is itself an [EditCommand], applying *it* yields the redo command, and so
  * on. The inverse is built from the page as it actually was at apply time, which is why an
- * erase can restore its strokes to their exact former positions.
+ * erase can restore its strokes to their exact former positions. Links are the exception: they
+ * carry no meaningful order, so removing and then restoring one re-appends it rather than
+ * returning it to its former index.
  *
- * The primitives come in mutually-inverse pairs — insert/remove for strokes and for layers —
- * plus two self-inverse replacements (a stroke swap for moves, a visibility toggle), which is
- * enough to express every public editing intention.
+ * The primitives come in mutually-inverse pairs — insert/remove for strokes, layers, and links —
+ * plus self-inverse replacements (a stroke swap for moves, a visibility toggle, a template-ref
+ * swap, a link-target swap), which together express every public editing intention.
  */
 internal sealed interface EditCommand {
     fun applyTo(page: Page): Applied
@@ -135,6 +141,45 @@ internal class SetTemplateRef(
 ) : EditCommand {
     override fun applyTo(page: Page): Applied =
         Applied(page.copy(templateRef = templateRef), SetTemplateRef(page.templateRef))
+}
+
+/** Appends a link to the page; inverse of [RemoveLink]. */
+internal class AddLink(
+    private val link: PageLink,
+) : EditCommand {
+    override fun applyTo(page: Page): Applied =
+        Applied(page.copy(links = page.links + link), RemoveLink(link.id))
+}
+
+/** Removes a link by id; inverse re-adds it at the end ([AddLink]) — link order is insignificant. */
+internal class RemoveLink(
+    private val id: LinkId,
+) : EditCommand {
+    override fun applyTo(page: Page): Applied {
+        val link = requireNotNull(page.links.firstOrNull { it.id == id }) {
+            "No link $id on page ${page.id}"
+        }
+        return Applied(page.copy(links = page.links - link), AddLink(link))
+    }
+}
+
+/** Sets a link's target notebook/page; self-inverse, capturing the prior target. */
+internal class SetLinkTarget(
+    private val id: LinkId,
+    private val targetNotebookId: NotebookId,
+    private val targetPageId: PageId,
+) : EditCommand {
+    override fun applyTo(page: Page): Applied {
+        val link = requireNotNull(page.links.firstOrNull { it.id == id }) {
+            "No link $id on page ${page.id}"
+        }
+        val updated = link.copy(targetNotebookId = targetNotebookId, targetPageId = targetPageId)
+        val links = page.links.map { if (it.id == id) updated else it }
+        return Applied(
+            page.copy(links = links),
+            SetLinkTarget(id, link.targetNotebookId, link.targetPageId),
+        )
+    }
 }
 
 /** Returns the layer with [id], or throws — the id came from the page, so absence is a bug. */

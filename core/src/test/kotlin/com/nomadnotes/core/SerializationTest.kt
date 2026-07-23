@@ -45,7 +45,7 @@ class SerializationTest {
         val page = samplePage().copy(
             links = listOf(
                 PageLink(
-                    id = LinkId.random(),
+                    id = LinkId("link-1"),
                     region = LinkRegion(10f, 20f, 110f, 60f),
                     targetNotebookId = NotebookId("nb-target"),
                     targetPageId = PageId("page-target"),

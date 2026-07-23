@@ -1,7 +1,12 @@
 package com.nomadnotes.core.edit
 
 import com.nomadnotes.core.LayerId
+import com.nomadnotes.core.LinkId
+import com.nomadnotes.core.LinkRegion
+import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
+import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageLink
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import com.nomadnotes.core.StrokePoint
@@ -37,6 +42,19 @@ class PageEditSessionTest {
 
     private fun mainStrokeIds(): List<StrokeId> =
         session.page.layers.first { it.id == mainLayer }.strokes.map { it.id }
+
+    private fun link(
+        id: String,
+        targetNotebook: String = "nb-target",
+        targetPage: String = "page-target",
+    ) = PageLink(
+        id = LinkId(id),
+        region = LinkRegion(0f, 0f, 10f, 10f),
+        targetNotebookId = NotebookId(targetNotebook),
+        targetPageId = PageId(targetPage),
+    )
+
+    private fun pageLinkIds(): List<LinkId> = session.page.links.map { it.id }
 
     // --- addStroke -------------------------------------------------------------------------
 
@@ -273,6 +291,91 @@ class PageEditSessionTest {
     fun `setTemplateRef to the current value is a no-op`() {
         // The page already has a null template ref.
         session.setTemplateRef(null)
+        assertFalse(session.canUndo)
+    }
+
+    // --- links -----------------------------------------------------------------------------
+
+    @Test
+    fun `addLink appears on page and undoes cleanly`() {
+        session.addLink(link("l1"))
+        assertEquals(listOf(LinkId("l1")), pageLinkIds())
+
+        assertTrue(session.undo())
+        assertEquals(emptyList<LinkId>(), pageLinkIds())
+
+        assertTrue(session.redo())
+        assertEquals(listOf(LinkId("l1")), pageLinkIds())
+    }
+
+    @Test
+    fun `removeLink removes and undo restores the identical link`() {
+        val original = link("l1")
+        session.addLink(original)
+
+        assertTrue(session.removeLink(LinkId("l1")))
+        assertTrue(session.page.links.isEmpty())
+
+        // The whole link — id, region, and target — comes back exactly as it was.
+        assertTrue(session.undo())
+        assertEquals(listOf(original), session.page.links)
+    }
+
+    @Test
+    fun `removeLink of absent id returns false and leaves history untouched`() {
+        session.addLink(link("l1"))
+        session.undo()
+        assertTrue(session.canRedo)
+
+        assertFalse(session.removeLink(LinkId("ghost")))
+
+        assertFalse(session.canUndo)
+        assertTrue("a no-op must not clear the redo stack", session.canRedo)
+    }
+
+    @Test
+    fun `setLinkTarget changes target and undo restores previous target`() {
+        session.addLink(link("l1", targetNotebook = "nb-a", targetPage = "page-a"))
+
+        assertTrue(session.setLinkTarget(LinkId("l1"), NotebookId("nb-b"), PageId("page-b")))
+        val moved = session.page.links.first { it.id == LinkId("l1") }
+        assertEquals(NotebookId("nb-b"), moved.targetNotebookId)
+        assertEquals(PageId("page-b"), moved.targetPageId)
+
+        assertTrue(session.undo())
+        val restored = session.page.links.first { it.id == LinkId("l1") }
+        assertEquals(NotebookId("nb-a"), restored.targetNotebookId)
+        assertEquals(PageId("page-a"), restored.targetPageId)
+    }
+
+    @Test
+    fun `setLinkTarget with identical target is a no-op`() {
+        session.addLink(link("l1", targetNotebook = "nb-a", targetPage = "page-a"))
+        val before = session.page
+
+        assertFalse(session.setLinkTarget(LinkId("l1"), NotebookId("nb-a"), PageId("page-a")))
+
+        assertEquals("a no-op must not change the page", before, session.page)
+        // No history entry was pushed: undoing the add is the only thing on the stack.
+        assertTrue(session.undo())
+        assertFalse(session.canUndo)
+    }
+
+    @Test
+    fun `link commands interleave with stroke commands in one history`() {
+        session.addStroke(mainLayer, stroke("s1"))
+        session.addLink(link("l1"))
+        assertEquals(listOf(StrokeId("s1")), mainStrokeIds())
+        assertEquals(listOf(LinkId("l1")), pageLinkIds())
+
+        // The link was the most recent change, so the first undo peels it off, leaving the stroke.
+        assertTrue(session.undo())
+        assertEquals(listOf(StrokeId("s1")), mainStrokeIds())
+        assertTrue(session.page.links.isEmpty())
+
+        // The second undo peels off the stroke.
+        assertTrue(session.undo())
+        assertTrue(mainStrokeIds().isEmpty())
         assertFalse(session.canUndo)
     }
 

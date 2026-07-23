@@ -23,7 +23,11 @@ import kotlinx.serialization.json.JsonElement
  *   present in [layers], and that layer cannot be removed.
  * @property links the page's tap-to-jump buttons, bound to the main layer's circled handwriting.
  *   Each maps a fixed page region to a target notebook page. Defaults to empty so pages written
- *   before links existed still decode; adding the field does not bump [formatVersion].
+ *   before links existed still decode; adding the field does not bump [formatVersion]. The order
+ *   of this list is insignificant and unspecified: editing may reorder it (undoing a link's
+ *   removal re-adds the link at the end, not at its former index), so consumers must not rely on
+ *   link order — hit-testing must be order-independent and treat overlapping regions as a
+ *   degenerate case with no defined winner.
  * @property formatVersion on-disk schema version of this page, for migrations.
  * @property extra forward-compatibility escape hatch for page-level fields written by a newer
  *   app version; preserved verbatim across a decode/encode roundtrip. See [Stroke.extra].

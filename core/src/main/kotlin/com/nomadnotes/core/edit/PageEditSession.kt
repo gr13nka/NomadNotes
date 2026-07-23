@@ -2,7 +2,11 @@ package com.nomadnotes.core.edit
 
 import com.nomadnotes.core.Layer
 import com.nomadnotes.core.LayerId
+import com.nomadnotes.core.LinkId
+import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
+import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageLink
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 
@@ -17,7 +21,9 @@ import com.nomadnotes.core.StrokeId
  * Undo/redo contract:
  *  - Each mutating call that actually changes the page pushes one undo entry; a call that would
  *    change nothing (moving by zero, erasing ids that are absent, setting the visibility a layer
- *    already has) is a no-op and leaves the history — including the redo stack — untouched.
+ *    already has, removing a link whose id is absent, retargeting a link to the target it already
+ *    holds) is a no-op and leaves the history — including the redo stack — untouched. Where such a
+ *    call has a boolean result ([removeLink], [setLinkTarget]) it returns false to report the no-op.
  *  - Any change clears the redo stack: once you edit after undoing, the undone future is gone.
  *  - The undo history is capped at [MAX_UNDO]; pushing past the cap discards the oldest entry,
  *    so only the most recent [MAX_UNDO] changes can be undone.
@@ -118,6 +124,36 @@ class PageEditSession(initialPage: Page) {
     fun setTemplateRef(ref: String?) {
         if (page.templateRef == ref) return
         commit(SetTemplateRef(ref))
+    }
+
+    /**
+     * Adds [link] to the page's tap-to-jump links. The caller owns identity: pass a link with a
+     * fresh [LinkId], or the inverse would remove the wrong one (see [pasteStrokes]).
+     */
+    fun addLink(link: PageLink) {
+        commit(AddLink(link))
+    }
+
+    /**
+     * Removes the link with [id] from the page. Returns false without changing anything when no
+     * link on the page has that id.
+     */
+    fun removeLink(id: LinkId): Boolean {
+        if (page.links.none { it.id == id }) return false
+        commit(RemoveLink(id))
+        return true
+    }
+
+    /**
+     * Points the link with [id] at the target notebook page ([targetNotebookId], [targetPageId]).
+     * Returns false without changing anything when no link has that id, or when the link already
+     * points at that exact target.
+     */
+    fun setLinkTarget(id: LinkId, targetNotebookId: NotebookId, targetPageId: PageId): Boolean {
+        val link = page.links.firstOrNull { it.id == id } ?: return false
+        if (link.targetNotebookId == targetNotebookId && link.targetPageId == targetPageId) return false
+        commit(SetLinkTarget(id, targetNotebookId, targetPageId))
+        return true
     }
 
     /** Reverts the most recent change. Returns false when there is nothing to undo. */
