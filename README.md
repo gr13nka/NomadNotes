@@ -4,15 +4,25 @@ A handwriting notes app for Onyx Boox e-ink tablets (validated on a Boox Go 10.3
 the lag-free, paper-like inking feel of a Supernote. The pen writes directly on the e-ink panel
 via the Onyx SDK's raw-drawing path; finished strokes are persisted so ink survives refreshes.
 
-This repository is currently a de-risking spike (`SpikeActivity`) that proves out lag-free pen
-capture on real hardware, not yet the full notes app.
+The editor is a working notes app: multi-page notebooks with layers and stationery templates,
+pen/pencil/marker tools, an eraser, and lasso select/move/copy/paste. Supernote-style **links**
+(Phase 2) turn circled main-layer handwriting into a tappable page region — tap it with the pen to
+jump to another notebook page, step back through jumps with the toolbar "←", and edit or delete a
+link by circling it again. `SpikeActivity` remains in the tree as the raw-drawing reference that
+first proved out lag-free capture on real hardware.
 
 ## Modules
 
-- `:core` — hardware-neutral data types (e.g. `StrokePoint`).
+- `:core` — the hardware-neutral note model and pure-JVM logic: `StrokePoint`, `Notebook`/`Page`/
+  `Layer`, `PageLink`, the undo/redo `PageEditSession`, and the lasso/eraser geometry.
 - `:pen-onyx` — the only module that touches the Onyx SDK (`OnyxRawDrawingController`).
-- `:app` — the Activity, surface, and stroke persistence; picks the Onyx backend on Boox and a
-  plain touch fallback everywhere else (emulator, ordinary tablet).
+- `:app` — the editor Activities, rendering, storage, and Compose chrome; picks the Onyx backend on
+  Boox and a plain touch fallback everywhere else (emulator, ordinary tablet).
+
+## Docs
+
+- Feature specs and implementation plans: `docs/superpowers/specs/` and `docs/superpowers/plans/`.
+- Future work and known device-pass findings: `docs/BACKLOG.md`.
 
 ## Build
 
@@ -29,7 +39,7 @@ Install and launch on a connected device:
 
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n com.nomadnotes/com.nomadnotes.app.SpikeActivity
+adb shell am start -n com.nomadnotes/com.nomadnotes.app.NotebookListActivity
 ```
 
 ## Device setup (Boox)
