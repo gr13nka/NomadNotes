@@ -35,6 +35,12 @@
     <string name="action_copy">Copy</string>
     <string name="action_paste">Paste</string>
     <string name="action_deselect">Deselect</string>
+    <string name="action_link">Link</string>
+
+    <!-- Editor: link target picker -->
+    <string name="link_picker_title">Link to page</string>
+    <string name="link_picker_current">%1$s (this notebook)</string>
+    <string name="link_picker_back">Back</string>
 
     <!-- Editor: nib width presets -->
     <string name="width_small">S</string>

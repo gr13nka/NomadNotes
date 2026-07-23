@@ -1,8 +1,10 @@
 package com.nomadnotes.app.storage
 
+import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.NotesJson
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -182,5 +184,29 @@ class NotebookStorageTest {
         File(root, "Stray.nnote").mkdirs() // a .nnote directory with no notebook.json
 
         assertEquals(listOf("Real"), storage.listNotebooks().map { it.name })
+    }
+
+    @Test
+    fun `findNotebookById resolves by identity and survives a directory rename`() {
+        val first = storage.createNotebook("First")
+        val second = storage.createNotebook("Second")
+
+        assertEquals(first.id, storage.findNotebookById(first.id)?.id)
+        assertEquals("Second", storage.findNotebookById(second.id)?.name)
+
+        // Simulate a user renaming the notebook by moving its directory on disk. The directory name
+        // is authoritative on load, so the notebook's name changes to "Renamed" — but its id must
+        // not, and findNotebookById keys on the id, so the target still resolves to this notebook.
+        assertTrue(File(root, "First.nnote").renameTo(File(root, "Renamed.nnote")))
+
+        val found = storage.findNotebookById(first.id)
+        assertEquals("id still resolves after the directory rename", first.id, found?.id)
+        assertEquals("and now points at the renamed notebook", "Renamed", found?.name)
+    }
+
+    @Test
+    fun `findNotebookById returns null when no notebook has the id`() {
+        storage.createNotebook("Only")
+        assertNull(storage.findNotebookById(NotebookId.random()))
     }
 }

@@ -1,6 +1,7 @@
 package com.nomadnotes.app.storage
 
 import com.nomadnotes.core.Notebook
+import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.NotesFormatException
 import com.nomadnotes.core.NotesJson
 import com.nomadnotes.core.Page
@@ -108,6 +109,25 @@ class NotebookStorage(private val rootDir: File) {
         // so later saves write back to this directory instead of resurrecting the old one via
         // savePage/saveNotebook's mkdirs.
         return if (notebook.name == dirName) notebook else notebook.copy(name = dirName)
+    }
+
+    /**
+     * The notebook whose stable [id] matches, or null if none does. Resolves a link target by its
+     * identity rather than its name, so a jump survives the target being renamed (a rename changes
+     * the directory name — the authoritative name — but never the id). Scans [listNotebooks] and
+     * reads each candidate's [loadNotebook] for its id, stopping at the first match; an unreadable
+     * notebook is skipped rather than thrown, so one corrupt notebook cannot break resolution of the
+     * rest.
+     *
+     * Unwired until link navigation lands (the next task): a tapped link resolves its target notebook
+     * through here before jumping. Exercised by tests until then.
+     */
+    fun findNotebookById(id: NotebookId): Notebook? {
+        for (ref in listNotebooks()) {
+            val notebook = runCatching { loadNotebook(ref.name) }.getOrNull()
+            if (notebook != null && notebook.id == id) return notebook
+        }
+        return null
     }
 
     /** Loads one page of [notebook]. Throws [StorageException] if it is missing or corrupt. */

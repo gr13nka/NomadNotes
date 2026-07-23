@@ -67,8 +67,12 @@ import com.nomadnotes.app.ui.EinkTheme
 import com.nomadnotes.app.ui.EinkToggle
 import com.nomadnotes.app.ui.EinkWhite
 import com.nomadnotes.core.LayerId
+import com.nomadnotes.core.LinkId
+import com.nomadnotes.core.LinkRegion
 import com.nomadnotes.core.Notebook
 import com.nomadnotes.core.Page
+import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageLink
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import com.nomadnotes.core.StrokePoint
@@ -94,6 +98,30 @@ private enum class InkShade(val level: Int) { BLACK(255), DARK(170), LIGHT(85) }
 
 /** A layer as the layers panel shows it: identity, label, visibility, and whether it is undeletable. */
 private data class LayerRow(val id: LayerId, val name: String, val visible: Boolean, val isMain: Boolean)
+
+/**
+ * What the target picker does once a page is chosen.
+ *
+ * [Create] attaches a fresh link over a just-lassoed region; [EditTarget] retargets an existing
+ * link. Only [Create] is wired today. [EditTarget] is the entry point for editing a circled link
+ * (a later task); it is defined here so the picker is built once around both modes, but no UI opens
+ * it yet.
+ */
+private sealed interface LinkPickerMode {
+    data class Create(val bounds: SelectionBounds) : LinkPickerMode
+    data class EditTarget(val linkId: LinkId) : LinkPickerMode
+}
+
+/**
+ * The open target picker's state: what it will do with the chosen page ([mode]), the notebooks it
+ * offers ([notebooks] — null until the off-main-thread load finishes), and the notebook drilled
+ * into for the page step ([chosenNotebook] — null while the notebook list is showing).
+ */
+private data class LinkPickerState(
+    val mode: LinkPickerMode,
+    val notebooks: List<Notebook>? = null,
+    val chosenNotebook: Notebook? = null,
+)
 
 /** Dims the screen behind an open panel and captures taps to dismiss it; no fade, instant. */
 private val ScrimColor = Color(0x33000000)
@@ -199,7 +227,9 @@ class EditorActivity : ComponentActivity() {
     private var uiTemplateFiles by mutableStateOf<List<String>>(emptyList())
     private var uiDeletePageDialog by mutableStateOf(false)
     private var uiHasSelection by mutableStateOf(false)
+    private var uiSelectionOnMainLayer by mutableStateOf(false)
     private var uiClipboardHasContent by mutableStateOf(false)
+    private var uiLinkPicker by mutableStateOf<LinkPickerState?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -242,6 +272,8 @@ class EditorActivity : ComponentActivity() {
         // drop any pending chrome resume so it cannot re-enable capture after we have paused.
         pendingChromeReenable?.let { surfaceView.removeCallbacks(it) }
         pendingChromeReenable = null
+        // Drop the transient target picker so we do not resume onto a stale overlay.
+        uiLinkPicker = null
         backend.setEnabled(false)
         // A lasso gesture still in flight when we background is dropped without a finishing callback
         // (disabling capture resets the collector), so clear its live-preview state now — otherwise the
@@ -703,6 +735,11 @@ class EditorActivity : ComponentActivity() {
         val had = selection != null
         selection = null
         selectionPolygon = null
+        // The picker is anchored to a selection, so clearing the selection dismisses it — this is how
+        // a tool switch (which routes through here) also closes it. The picker's own scrim blocks the
+        // toolbar while it is open, so this never runs with the picker actually up, and the backend
+        // resume it would need is handled by the confirm/cancel paths instead.
+        uiLinkPicker = null
         updateSelectionUi()
         // The decoration scratch is only needed while a selection is on screen; free it now and let
         // the next selection rebuild it on demand (decorationScratch), rather than holding a
@@ -713,7 +750,11 @@ class EditorActivity : ComponentActivity() {
     }
 
     private fun updateSelectionUi() {
+        val selection = selection
         uiHasSelection = selection != null
+        // A link binds to the main layer's handwriting (spec), so the "Link" action is offered only
+        // for a main-layer selection.
+        uiSelectionOnMainLayer = selection != null && selection.layerId == session?.page?.mainLayerId
     }
 
     /** The active layer if it is still on the page, else the main layer — so an edit never targets a gone layer. */
@@ -723,6 +764,75 @@ class EditorActivity : ComponentActivity() {
     /** A deep copy of the stroke with a fresh id and its points shifted by ([dx], [dy]). */
     private fun Stroke.offsetCopy(dx: Float, dy: Float): Stroke =
         copy(id = StrokeId.random(), points = points.map { it.copy(x = it.x + dx, y = it.y + dy) })
+
+    // --- link target picker ----------------------------------------------------------------
+
+    /** Opens the target picker for the current main-layer selection, to link its region to a page. */
+    private fun openLinkPickerForSelection() {
+        val selection = selection ?: return
+        if (selection.layerId != session?.page?.mainLayerId) return
+        openLinkPicker(LinkPickerMode.Create(selection.bounds))
+    }
+
+    /**
+     * Shows the picker in [mode] and loads the notebooks it offers off the main thread. Suppresses
+     * pen capture while it is open (via [updateBackendEnabled]), like the layers/template panels, so
+     * a tap meant for the picker never draws.
+     */
+    private fun openLinkPicker(mode: LinkPickerMode) {
+        uiLinkPicker = LinkPickerState(mode = mode)
+        updateBackendEnabled()
+        lifecycleScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching {
+                    storage.listNotebooks().mapNotNull { ref ->
+                        runCatching { storage.loadNotebook(ref.name) }.getOrNull()
+                    }
+                }.getOrDefault(emptyList())
+            }
+            // Drop the result if the picker was dismissed while loading. The list is the same for any
+            // open picker, so filling in whichever one is now up is correct.
+            uiLinkPicker = uiLinkPicker?.copy(notebooks = loaded)
+        }
+    }
+
+    /** Closes the picker and restores pen capture (which the open picker suppressed). The selection stays. */
+    private fun closeLinkPicker() {
+        uiLinkPicker = null
+        updateBackendEnabled()
+    }
+
+    /** A page was chosen in the picker: act on it per the picker's mode, then close and repaint. */
+    private fun confirmLinkTarget(picker: LinkPickerState, targetNotebook: Notebook, targetPageId: PageId) {
+        val mode = picker.mode
+        if (mode is LinkPickerMode.Create) createLink(mode.bounds, targetNotebook, targetPageId)
+    }
+
+    /**
+     * Attaches a link over the lassoed region ([bounds] padded outward) pointing at ([targetNotebook],
+     * [targetPageId]), then drops the selection and picker and repaints so the new affordance shows —
+     * the single-present tail of [deleteSelection] (null the state, then one [renderPage]), not a
+     * [clearSelection] that would blit a link-less frame first. Re-enables pen capture last, after the
+     * present, so raw drawing does not resume before the frame reaches the panel.
+     */
+    private fun createLink(bounds: SelectionBounds, targetNotebook: Notebook, targetPageId: PageId) {
+        val session = session ?: return
+        val region = LinkRegion(
+            left = bounds.left - LINK_REGION_PADDING_PX,
+            top = bounds.top - LINK_REGION_PADDING_PX,
+            right = bounds.right + LINK_REGION_PADDING_PX,
+            bottom = bounds.bottom + LINK_REGION_PADDING_PX,
+        )
+        session.addLink(PageLink(LinkId.random(), region, targetNotebook.id, targetPageId))
+        selection = null
+        selectionPolygon = null
+        uiLinkPicker = null
+        updateSelectionUi()
+        refreshUndoRedo()
+        renderPage()
+        scheduleAutosave()
+        updateBackendEnabled()
+    }
 
     // --- toolbar actions -------------------------------------------------------------------
 
@@ -863,9 +973,9 @@ class EditorActivity : ComponentActivity() {
         updateBackendEnabled()
     }
 
-    /** Pen capture is off while a panel is open, so a tap meant for the panel never draws a stroke. */
+    /** Pen capture is off while a panel or the link picker is open, so a tap meant for it never draws a stroke. */
     private fun updateBackendEnabled() {
-        backend.setEnabled(!uiLayersOpen && !uiTemplateOpen)
+        backend.setEnabled(!uiLayersOpen && !uiTemplateOpen && uiLinkPicker == null)
     }
 
     /**
@@ -1088,6 +1198,10 @@ class EditorActivity : ComponentActivity() {
                     if (uiHasSelection) {
                         EinkButton(stringResource(R.string.action_copy)) { withChromeRefresh { copySelection() } }
                         EinkButton(stringResource(R.string.action_delete)) { withChromeRefresh { deleteSelection() } }
+                        // A link binds to the main layer's handwriting, so this is hidden for other layers.
+                        if (uiSelectionOnMainLayer) {
+                            EinkButton(stringResource(R.string.action_link)) { withChromeRefresh { openLinkPickerForSelection() } }
+                        }
                         EinkButton(stringResource(R.string.action_deselect)) { withChromeRefresh { clearSelection() } }
                     }
                     if (uiClipboardHasContent) {
@@ -1144,6 +1258,10 @@ class EditorActivity : ComponentActivity() {
         if (uiTemplateOpen) {
             Scrim { toggleTemplatePanel() }
             TemplatePanel(Modifier.align(Alignment.TopEnd).fillMaxHeight())
+        }
+        uiLinkPicker?.let { picker ->
+            Scrim { closeLinkPicker() }
+            LinkPickerPanel(picker, Modifier.align(Alignment.TopEnd).fillMaxHeight())
         }
         if (uiDeletePageDialog) {
             ConfirmDialog(
@@ -1229,6 +1347,61 @@ class EditorActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * The two-step target picker: first the notebooks (current one first, marked as such), then a
+     * page number within the chosen notebook. Each list wraps in a [FlowRow], and the panel scrolls
+     * like the layers/template panels so a long notebook or page list stays fully reachable; the
+     * scrim behind it cancels. Choosing a page confirms the link.
+     */
+    @OptIn(ExperimentalLayoutApi::class)
+    @Composable
+    private fun LinkPickerPanel(picker: LinkPickerState, modifier: Modifier) {
+        Column(
+            modifier = modifier
+                .width(360.dp)
+                .background(EinkWhite)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(stringResource(R.string.link_picker_title), color = EinkBlack, fontSize = 18.sp)
+            val chosen = picker.chosenNotebook
+            if (chosen == null) {
+                val notebooks = picker.notebooks
+                if (notebooks != null) {
+                    val currentId = notebook?.id
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        // Current notebook first; the rest keep listNotebooks' name order (stable sort).
+                        for (nb in notebooks.sortedByDescending { it.id == currentId }) {
+                            val label = if (nb.id == currentId) {
+                                stringResource(R.string.link_picker_current, nb.name)
+                            } else {
+                                nb.name
+                            }
+                            EinkButton(label) { uiLinkPicker = picker.copy(chosenNotebook = nb) }
+                        }
+                    }
+                }
+            } else {
+                Text(chosen.name, color = EinkBlack, fontSize = 15.sp)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    chosen.pageIds.forEachIndexed { index, pageId ->
+                        EinkButton((index + 1).toString()) { confirmLinkTarget(picker, chosen, pageId) }
+                    }
+                }
+                EinkButton(stringResource(R.string.link_picker_back)) {
+                    uiLinkPicker = picker.copy(chosenNotebook = null)
+                }
+            }
+        }
+    }
+
     companion object {
         private const val TAG = "EditorActivity"
 
@@ -1260,6 +1433,12 @@ class EditorActivity : ComponentActivity() {
 
         /** How far a paste is offset from the copied strokes, in page pixels, so it does not hide them. */
         private const val PASTE_OFFSET_PX = 24f
+
+        /**
+         * How far a link's tappable region is grown beyond the selection's bounding box, in page
+         * pixels on each side, so the affordance frames the circled handwriting rather than clipping it.
+         */
+        private const val LINK_REGION_PADDING_PX = 8f
 
         /** Image extensions offered as user templates from the `templates/` directory. */
         private val TEMPLATE_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "bmp")
