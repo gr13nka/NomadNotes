@@ -15,3 +15,8 @@ captures/
 
 # Serena project state — machine-local, not part of the project.
 .serena/
+
+# A clone of the OpenInkBridge SDK, kept alongside for reference only. Not a dependency: its stroke
+# processing is a 3-tap moving average we do better in :core, and its Onyx layer duplicates
+# :pen-onyx while pulling repo.boox.com, which this project does not use.
+OpenInkBridge/

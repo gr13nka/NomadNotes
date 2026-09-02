@@ -8,8 +8,11 @@ import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.UUID
 
 /** A notebook found on disk: its [name] (its directory name without `.nnote`) and the [dir] holding it. */
 data class NotebookRef(val name: String, val dir: File)
@@ -35,7 +38,11 @@ class StorageException(message: String, cause: Throwable? = null) : Exception(me
  *   <name>.nnote/              one notebook == one directory
  *     notebook.json            the Notebook (page order + metadata)
  *     pages/<page-id>.json     one file per Page, so a page's strokes load on demand
+ *     images/<asset-ref>       pictures placed on this notebook's pages
  * ```
+ *
+ * Image files live inside the notebook rather than in a shared folder so a notebook stays
+ * self-contained: copying its directory takes its pictures along, and deleting it takes them away.
  *
  * ### Name is directory
  * A notebook's name and its directory name are the same string and are kept in step: [listNotebooks]
@@ -150,6 +157,45 @@ class NotebookStorage(private val rootDir: File) {
         }
     }
 
+    /**
+     * Copies the picture in [source] into [notebook]'s own `images/` directory and returns the
+     * asset ref that identifies it — the value to store on a `PageImage`. [extension] is the file
+     * type to keep it as ("png", "jpg", …); the name itself is generated, so importing the same
+     * picture twice yields two independent assets and re-importing can never overwrite one in use.
+     *
+     * The stream is read to completion but not closed — the caller owns it.
+     */
+    fun importImage(notebook: Notebook, source: InputStream, extension: String): String {
+        val dir = imagesDir(notebook)
+        if (!dir.isDirectory && !dir.mkdirs()) {
+            throw StorageException("Could not create images directory: ${dir.path}")
+        }
+        val assetRef = "${UUID.randomUUID()}.${extension.lowercase()}"
+        writeAtomically(File(dir, assetRef)) { out -> source.copyTo(out) }
+        return assetRef
+    }
+
+    /**
+     * The file an image's [assetRef] names, or null when there is no such picture — the ref is
+     * missing, or does not name a plain file directly inside this notebook's `images/`.
+     *
+     * Refs come from stored pages and are treated as untrusted: one containing a path separator or a
+     * parent-directory step resolves to null rather than reaching outside the notebook. A null is an
+     * ordinary outcome (the file was deleted behind the app's back), so callers draw nothing rather
+     * than failing the page.
+     */
+    fun imageFile(notebook: Notebook, assetRef: String): File? {
+        if (assetRef.isEmpty() || assetRef.any { it == '/' || it == '\\' } || assetRef == "." || assetRef == "..") {
+            return null
+        }
+        val file = File(imagesDir(notebook), assetRef)
+        return if (file.isFile) file else null
+    }
+
+    /** The directory holding [notebook]'s pictures (`<name>.nnote/images/`). May not exist yet. */
+    fun imagesDir(notebook: Notebook): File =
+        File(notebookDir(validateName(notebook.name)), IMAGES_DIR)
+
     /** Atomically writes [notebook]'s `notebook.json`. */
     fun saveNotebook(notebook: Notebook) {
         val dir = notebookDir(validateName(notebook.name))
@@ -222,9 +268,18 @@ class NotebookStorage(private val rootDir: File) {
      * copy that could truncate the good file.
      */
     private fun writeAtomically(target: File, text: String) {
+        writeAtomically(target) { it.write(text.toByteArray()) }
+    }
+
+    /**
+     * Fills [target] by handing [fill] a stream to write, then moving the finished file into place.
+     * The text form above and the image import share this, so nothing reaches a real path until it
+     * is complete.
+     */
+    private fun writeAtomically(target: File, fill: (OutputStream) -> Unit) {
         val tmp = File(target.parentFile, "${target.name}.tmp")
         try {
-            tmp.writeText(text)
+            tmp.outputStream().use(fill)
             Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
         } catch (e: IOException) {
             throw StorageException("Could not write ${target.path}", e)
@@ -255,6 +310,7 @@ class NotebookStorage(private val rootDir: File) {
         const val NOTEBOOK_SUFFIX = ".nnote"
         const val NOTEBOOK_FILE = "notebook.json"
         const val PAGES_DIR = "pages"
+        const val IMAGES_DIR = "images"
         const val TEMPLATES_DIR = "templates"
         val FORBIDDEN_NAME_CHARS = "/\\:*?\"<>|".toSet()
     }

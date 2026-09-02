@@ -11,6 +11,9 @@ import android.view.SurfaceView
 import com.nomadnotes.app.render.StrokeRenderer
 import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
+import com.nomadnotes.core.ink.MIN_SMOOTHABLE_POINTS
+import com.nomadnotes.core.ink.SmoothingLevel
+import com.nomadnotes.core.ink.smoothStroke
 
 /**
  * A [PenBackend] built on ordinary touch input, for the emulator and non-Onyx tablets.
@@ -47,9 +50,13 @@ class AndroidPenBackend(
     private val erasePreviewPaint = strokePaint(ERASE_PREVIEW_COLOR, ERASE_PREVIEW_WIDTH)
     private val previewPath = Path()
 
+    // How the preview smooths the points it draws, mirroring what the editor will commit.
+    private var inkSmoothing = SmoothingLevel.OFF
+
     // Any pointer is a drawing tool here (the emulator and plain tablets use touch, not a stylus).
     private val collector = GestureCollector(
         stylusOnly = false,
+        onStarted = { listener?.onGestureStarted() },
         onSample = { points -> onGestureSample(points) },
         onFinished = { points -> onGestureFinished(points) },
         onCancelled = { onGestureCancelled() },
@@ -79,6 +86,10 @@ class AndroidPenBackend(
         inkPreviewPaint = strokePaint(color, width).apply {
             if (tool == Tool.MARKER) alpha = StrokeRenderer.MARKER_ALPHA
         }
+    }
+
+    override fun setInkSmoothing(level: SmoothingLevel) {
+        inkSmoothing = level
     }
 
     override fun present(composite: Bitmap, cleanRefresh: Boolean) {
@@ -166,10 +177,29 @@ class AndroidPenBackend(
             canvas.drawPoint(points[0].x, points[0].y, paint)
             return
         }
+        val shown = if (captureMode == CaptureMode.INK) smoothedSoFar(points) else points
         previewPath.reset()
-        previewPath.moveTo(points[0].x, points[0].y)
-        for (i in 1 until points.size) previewPath.lineTo(points[i].x, points[i].y)
+        previewPath.moveTo(shown[0].x, shown[0].y)
+        for (i in 1 until shown.size) previewPath.lineTo(shown[i].x, shown[i].y)
         canvas.drawPath(previewPath, paint)
+    }
+
+    /**
+     * The in-progress stroke as it should be previewed: the settled part smoothed, the newest samples
+     * left raw.
+     *
+     * Smoothing needs points on *both* sides of the one it is placing, so the last few samples of a
+     * stroke still being drawn cannot be smoothed — there is nothing after them yet. Trying anyway
+     * would make the ink squirm behind the pen as each new sample rewrote the previous one. Holding
+     * the tail back instead keeps the preview stable: it is smooth everywhere except the short raw
+     * stub under the pen tip, which the next samples then absorb.
+     */
+    private fun smoothedSoFar(points: List<StrokePoint>): List<StrokePoint> {
+        if (inkSmoothing == SmoothingLevel.OFF) return points
+        val settled = points.size - RAW_TAIL_POINTS
+        if (settled < MIN_SMOOTHABLE_POINTS) return points
+        return smoothStroke(points.subList(0, settled), inkSmoothing) +
+            points.subList(settled, points.size)
     }
 
     private fun strokePaint(color: Int, width: Float) = Paint().apply {
@@ -188,5 +218,8 @@ class AndroidPenBackend(
         /** The eraser preview hints its path and rough reach without looking like drawn ink. */
         const val ERASE_PREVIEW_WIDTH = 12f
         const val ERASE_PREVIEW_COLOR = 0x66808080 // translucent gray
+
+        /** How many of the newest samples stay raw in a live preview, having no points after them yet. */
+        const val RAW_TAIL_POINTS = 2
     }
 }

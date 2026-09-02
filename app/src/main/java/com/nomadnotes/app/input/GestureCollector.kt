@@ -19,6 +19,8 @@ import com.nomadnotes.core.StrokePoint
  * @param stylusOnly when true, only a stylus/eraser tool starts and extends a gesture, so a palm or
  *   finger touch is ignored (Onyx, where the finger is not a drawing tool); when false, any pointer
  *   is captured (the emulator and plain tablets, where touch itself is the input).
+ * @param onStarted a gesture just began, reported before its first [onSample] so a caller can act on
+ *   the pen-down itself rather than on the points it produces.
  * @param onSample the growing point list, on pen-down and each move, for a live preview. The list is
  *   valid only for the duration of the call — copy it to retain it.
  * @param onFinished the gesture's full path at pen-up; this list is the caller's to keep.
@@ -27,6 +29,7 @@ import com.nomadnotes.core.StrokePoint
  */
 class GestureCollector(
     private val stylusOnly: Boolean,
+    private val onStarted: () -> Unit = {},
     private val onSample: (List<StrokePoint>) -> Unit,
     private val onFinished: (List<StrokePoint>) -> Unit,
     private val onCancelled: () -> Unit,
@@ -51,6 +54,7 @@ class GestureCollector(
                 gestureStart = event.eventTime
                 points.clear()
                 points.add(pointOf(event))
+                onStarted()
                 onSample(points)
                 true
             }

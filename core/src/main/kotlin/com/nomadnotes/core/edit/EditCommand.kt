@@ -1,12 +1,15 @@
 package com.nomadnotes.core.edit
 
+import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.Layer
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.LinkId
 import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageImage
 import com.nomadnotes.core.PageLink
+import com.nomadnotes.core.PageRect
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import com.nomadnotes.core.StrokePoint
@@ -23,9 +26,10 @@ import com.nomadnotes.core.StrokePoint
  * carry no meaningful order, so removing and then restoring one re-appends it rather than
  * returning it to its former index.
  *
- * The primitives come in mutually-inverse pairs — insert/remove for strokes, layers, and links —
- * plus self-inverse replacements (a stroke swap for moves, a visibility toggle, a template-ref
- * swap, a link-target swap), which together express every public editing intention.
+ * The primitives come in mutually-inverse pairs — insert/remove for strokes, layers, links, and
+ * images — plus self-inverse replacements (a stroke swap for moves, a visibility toggle, a
+ * template-ref swap, a link-target swap, an image-rect swap), which together express every public
+ * editing intention.
  */
 internal sealed interface EditCommand {
     fun applyTo(page: Page): Applied
@@ -178,6 +182,61 @@ internal class SetLinkTarget(
         return Applied(
             page.copy(links = links),
             SetLinkTarget(id, link.targetNotebookId, link.targetPageId),
+        )
+    }
+}
+
+/** Adds an image to the top of a layer's image stack; inverse of [RemoveImage]. */
+internal class AddImage(
+    private val layerId: LayerId,
+    private val image: PageImage,
+) : EditCommand {
+    override fun applyTo(page: Page): Applied {
+        val layer = page.layerOrThrow(layerId)
+        val newPage = page.withLayer(layer.copy(images = layer.images + image))
+        return Applied(newPage, RemoveImage(layerId, image.id))
+    }
+}
+
+/**
+ * Removes an image by id; inverse re-adds it on top ([AddImage]).
+ *
+ * Like links, images are restored by appending rather than to a captured index. Their order only
+ * decides how two overlapping pictures on the same layer stack, which no editing operation exposes.
+ */
+internal class RemoveImage(
+    private val layerId: LayerId,
+    private val id: ImageId,
+) : EditCommand {
+    override fun applyTo(page: Page): Applied {
+        val layer = page.layerOrThrow(layerId)
+        val image = requireNotNull(layer.images.firstOrNull { it.id == id }) {
+            "No image $id on layer $layerId of page ${page.id}"
+        }
+        val newPage = page.withLayer(layer.copy(images = layer.images - image))
+        return Applied(newPage, AddImage(layerId, image))
+    }
+}
+
+/**
+ * Sets where an image sits; self-inverse, capturing the prior rectangle. One command covers both
+ * moving and resizing, because to the page they are the same edit — the picture occupies a different
+ * rectangle than it did.
+ */
+internal class SetImageRect(
+    private val layerId: LayerId,
+    private val id: ImageId,
+    private val rect: PageRect,
+) : EditCommand {
+    override fun applyTo(page: Page): Applied {
+        val layer = page.layerOrThrow(layerId)
+        val image = requireNotNull(layer.images.firstOrNull { it.id == id }) {
+            "No image $id on layer $layerId of page ${page.id}"
+        }
+        val images = layer.images.map { if (it.id == id) it.copy(rect = rect) else it }
+        return Applied(
+            page.withLayer(layer.copy(images = images)),
+            SetImageRect(layerId, id, image.rect),
         )
     }
 }

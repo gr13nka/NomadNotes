@@ -5,12 +5,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pins the boundary contract of [LinkRegion.contains]: the tappable area is closed on all four
+ * Pins the boundary contract of [PageRect.contains]: the tappable area is closed on all four
  * edges, so a tap landing exactly on an edge still hits the link.
  */
-class LinkRegionTest {
+class PageRectTest {
 
-    private val region = LinkRegion(left = 0f, top = 0f, right = 10f, bottom = 10f)
+    private val region = PageRect(left = 0f, top = 0f, right = 10f, bottom = 10f)
 
     @Test
     fun `contains includes points on every edge`() {

@@ -1,15 +1,22 @@
 package com.nomadnotes.app
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Rect
+import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -44,6 +51,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.nomadnotes.R
+import com.nomadnotes.app.editor.ImageGrip
+import com.nomadnotes.app.editor.ImagePlacement
 import com.nomadnotes.app.editor.SelectionBounds
 import com.nomadnotes.app.editor.SelectionState
 import com.nomadnotes.app.editor.TapClassifier
@@ -51,11 +60,13 @@ import com.nomadnotes.app.input.AndroidPenBackend
 import com.nomadnotes.app.input.CaptureMode
 import com.nomadnotes.app.input.OnyxPenBackend
 import com.nomadnotes.app.input.PenBackend
+import com.nomadnotes.app.render.ImageResolver
 import com.nomadnotes.app.render.PageRenderer
 import com.nomadnotes.app.render.SelectionRenderer
 import com.nomadnotes.app.render.StrokeRenderer
 import com.nomadnotes.app.render.TemplateRef
 import com.nomadnotes.app.render.TemplateResolver
+import com.nomadnotes.app.storage.EditorPrefs
 import com.nomadnotes.app.storage.NotebookStorage
 import com.nomadnotes.app.storage.notebooksRoot
 import com.nomadnotes.app.ui.ConfirmDialog
@@ -67,13 +78,15 @@ import com.nomadnotes.app.ui.EinkRadioDot
 import com.nomadnotes.app.ui.EinkTheme
 import com.nomadnotes.app.ui.EinkToggle
 import com.nomadnotes.app.ui.EinkWhite
+import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.LinkId
-import com.nomadnotes.core.LinkRegion
 import com.nomadnotes.core.Notebook
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageImage
 import com.nomadnotes.core.PageLink
+import com.nomadnotes.core.PageRect
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import com.nomadnotes.core.StrokePoint
@@ -83,6 +96,8 @@ import com.nomadnotes.core.geometry.Vec2
 import com.nomadnotes.core.geometry.eraserHit
 import com.nomadnotes.core.geometry.lassoCoversRegion
 import com.nomadnotes.core.geometry.lassoSelect
+import com.nomadnotes.core.ink.SmoothingLevel
+import com.nomadnotes.core.ink.smoothStroke
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -155,13 +170,24 @@ class EditorActivity : ComponentActivity() {
     private lateinit var surfaceView: SurfaceView
     private lateinit var storage: NotebookStorage
     private lateinit var templateResolver: TemplateResolver
+    private lateinit var prefs: EditorPrefs
 
-    private val renderer = PageRenderer()
+    // Decodes placed images on demand. Reads the notebook through a lambda rather than holding one,
+    // so the same resolver keeps working as the editor follows a link into another notebook.
+    private val imageResolver = ImageResolver { ref ->
+        notebook?.let { storage.imageFile(it, ref) }
+    }
+
+    private val renderer = PageRenderer(imageResolver)
     private val selectionRenderer = SelectionRenderer()
 
     // Draws the selected strokes onto the live move-drag preview (the same ink path a committed
     // stroke takes through PageRenderer, so the previewed strokes look identical to the result).
     private val strokeRenderer = StrokeRenderer()
+
+    // Filtered scaling for the dragged image's preview, matching how PageRenderer draws a committed
+    // one, so the picture does not change appearance the moment the pen lifts.
+    private val imagePreviewPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
     // Chosen in onCreate: the Onyx raw-drawing backend on Boox hardware, the plain touch backend
     // everywhere else. The editor talks only to the interface and never learns which it holds.
@@ -216,6 +242,10 @@ class EditorActivity : ComponentActivity() {
     // cancel it, and so onPause can drop it before we background.
     private var pendingChromeReenable: Runnable? = null
 
+    // A pending repaint that replaces the hardware's raw wet ink with the smoothed strokes, posted
+    // after a stroke and cancelled by the next pen-down (see [scheduleSmoothingSettle]).
+    private var pendingSmoothingSettle: Runnable? = null
+
     // Toolbar/panel state, hoisted here so the AndroidView canvas can read none of it. The pen
     // listener also reads the drawing ones (tool/width/shade/active layer), but a plain value read
     // creates no recomposition dependency.
@@ -224,6 +254,7 @@ class EditorActivity : ComponentActivity() {
     private var uiLasso by mutableStateOf(false)
     private var uiWidth by mutableStateOf(StrokeWidth.M)
     private var uiShade by mutableStateOf(InkShade.BLACK)
+    private var uiSmoothing by mutableStateOf(SmoothingLevel.OFF)
     private var uiCanUndo by mutableStateOf(false)
     private var uiCanRedo by mutableStateOf(false)
     private var uiPageIndex by mutableStateOf(0)
@@ -245,6 +276,17 @@ class EditorActivity : ComponentActivity() {
     // made, so both sets of actions can show at once. Cleared by [clearSelection] (and tool switches).
     private var uiCircledLink by mutableStateOf<LinkId?>(null)
 
+    // The image the last lasso circled, or null. Drives the image frame drawn over the page, the
+    // "Delete image" action, and whether a drag grabs an image. Cleared exactly where the circled
+    // link is, so the two selections never outlive the gesture that made them.
+    private var uiCircledImage by mutableStateOf<ImageId?>(null)
+
+    // The image drag in flight, from the first sample to the finishing gesture; null when the current
+    // gesture is not moving or resizing an image. `imageDragRect` is where the drag has got to, which
+    // the preview draws and the commit stores.
+    private var imageDrag: ImageDrag? = null
+    private var imageDragRect: PageRect? = null
+
     // The broken link awaiting the "delete or cancel" dialog, or null when none is up. Set when a
     // tapped link resolves to a missing notebook or a missing page; the dialog offers to remove it.
     private var uiBrokenLinkDialog by mutableStateOf<PageLink?>(null)
@@ -256,12 +298,21 @@ class EditorActivity : ComponentActivity() {
     private val jumpStack = ArrayDeque<JumpOrigin>()
     private var uiJumpDepth by mutableStateOf(0)
 
+    // The system photo picker. It grants read access to just the picked item for the length of the
+    // callback, which needs no storage permission of our own — so the import must copy the bytes out
+    // then and there (see [insertImage]).
+    private val imagePicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) insertImage(uri)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val root = notebooksRoot(this)
         Log.i(TAG, "Storage root: ${root.path}")
         storage = NotebookStorage(root)
         templateResolver = TemplateResolver(storage.templatesDir)
+        prefs = EditorPrefs(this)
+        uiSmoothing = prefs.smoothing
         surfaceView = SurfaceView(this)
         backend = createBackend()
         surfaceView.holder.addCallback(surfaceCallback)
@@ -297,6 +348,8 @@ class EditorActivity : ComponentActivity() {
         // drop any pending chrome resume so it cannot re-enable capture after we have paused.
         pendingChromeReenable?.let { surfaceView.removeCallbacks(it) }
         pendingChromeReenable = null
+        // Likewise the settle repaint: backgrounding already repaints, and it must not blit later.
+        cancelSmoothingSettle()
         // Drop the transient target picker so we do not resume onto a stale overlay.
         uiLinkPicker = null
         backend.setEnabled(false)
@@ -317,6 +370,7 @@ class EditorActivity : ComponentActivity() {
         backend.detach()
         renderer.release()
         templateResolver.release()
+        imageResolver.release()
         decorationBitmap?.recycle()
         decorationBitmap = null
         dragBaseBitmap?.recycle()
@@ -400,6 +454,7 @@ class EditorActivity : ComponentActivity() {
         composePage()
         if (!backendAttached) {
             backend.setStrokeAppearance(uiTool, uiWidth.px, uiShade.level)
+            backend.setInkSmoothing(uiSmoothing)
             backend.attach(surfaceView, penListener)
             backendAttached = true
         } else {
@@ -440,12 +495,22 @@ class EditorActivity : ComponentActivity() {
      */
     private fun present(cleanRefresh: Boolean = false) {
         val selection = selection
-        if (selection == null) presentComposite(cleanRefresh)
-        else presentDecorated(selection.bounds, selectionPolygon, cleanRefresh)
+        val imageRect = circledImageRect()
+        if (selection == null && imageRect == null) presentComposite(cleanRefresh)
+        else presentDecorated(selection?.bounds, selectionPolygon, imageRect, cleanRefresh)
     }
 
-    /** Composites the page plus [polygon] (if any) and the [bounds] box into the scratch bitmap, then presents it. */
-    private fun presentDecorated(bounds: SelectionBounds, polygon: List<Vec2>?, cleanRefresh: Boolean = false) {
+    /**
+     * Composites the page plus whichever decorations are live — the lasso [polygon], the selection
+     * [bounds] box, the frame around a circled image at [imageRect] — into the scratch bitmap, then
+     * presents it. Any of them may be null; they are independent outcomes of one lasso.
+     */
+    private fun presentDecorated(
+        bounds: SelectionBounds?,
+        polygon: List<Vec2>?,
+        imageRect: PageRect?,
+        cleanRefresh: Boolean = false,
+    ) {
         val scratch = decorationScratch()
         if (scratch == null) {
             presentComposite(cleanRefresh)
@@ -454,7 +519,8 @@ class EditorActivity : ComponentActivity() {
         val canvas = Canvas(scratch)
         canvas.drawBitmap(renderer.composite(), 0f, 0f, null)
         polygon?.let { selectionRenderer.drawPolygon(canvas, it) }
-        selectionRenderer.drawBounds(canvas, bounds)
+        bounds?.let { selectionRenderer.drawBounds(canvas, it) }
+        imageRect?.let { selectionRenderer.drawImageFrame(canvas, it) }
         backend.present(scratch, cleanRefresh)
     }
 
@@ -471,6 +537,11 @@ class EditorActivity : ComponentActivity() {
     // --- pen input -------------------------------------------------------------------------
 
     private val penListener = object : PenBackend.Listener {
+        override fun onGestureStarted() {
+            // The pen is down again: abandon the settle repaint rather than blit through the stroke.
+            cancelSmoothingSettle()
+        }
+
         override fun onStrokeFinished(points: List<StrokePoint>) {
             val session = session ?: return
             if (points.isEmpty()) return
@@ -490,14 +561,16 @@ class EditorActivity : ComponentActivity() {
                 tool = uiTool,
                 widthBase = uiWidth.px,
                 grayLevel = uiShade.level,
-                points = points,
+                // Smoothing runs after the tap test above, so link taps are still classified from
+                // what the pen actually did rather than from a refitted curve.
+                points = smoothStroke(points, uiSmoothing),
             )
             session.addStroke(layerId, stroke)
             // Always record the stroke into the layer bitmap. Present it only when the backend does
             // not paint wet ink itself: on Onyx the panel already shows this stroke, and a per-stroke
             // blit there (with raw drawing briefly disabled) is exactly what delays the next stroke.
             renderer.appendStroke(layerId, stroke)
-            if (!backend.rendersWetInkNatively) presentComposite()
+            if (!backend.rendersWetInkNatively) presentComposite() else scheduleSmoothingSettle()
             refreshUndoRedo()
             scheduleAutosave()
         }
@@ -559,8 +632,12 @@ class EditorActivity : ComponentActivity() {
             return
         }
         val dragging = draggingSelection
+        val imageDrag = imageDrag
         if (dragging != null) {
             if (throttleAllowsPresent()) presentMoveDrag(dx = here.x - start.x, dy = here.y - start.y)
+        } else if (imageDrag != null) {
+            imageDragRect = imageDrag.rectAfter(dx = here.x - start.x, dy = here.y - start.y)
+            if (throttleAllowsPresent()) presentImageDrag()
         } else {
             lassoDrawSamples.add(here)
             if (throttleAllowsPresent()) presentLassoDraw()
@@ -575,6 +652,8 @@ class EditorActivity : ComponentActivity() {
         if (selection != null && selection.bounds.contains(start.x, start.y)) {
             beginMoveDrag(selection)
             presentMoveDrag(dx = 0f, dy = 0f) // lift the selection off its base straight away
+        } else if (beginImageDrag(start)) {
+            presentImageDrag() // lift the image off its base straight away
         } else {
             lassoDrawSamples.clear()
             lassoDrawSamples.add(start)
@@ -643,6 +722,8 @@ class EditorActivity : ComponentActivity() {
         lassoGestureStart = null
         draggingSelection = null
         dragStrokes = emptyList()
+        imageDrag = null
+        imageDragRect = null
         lassoDrawSamples.clear()
         dragBaseBitmap?.recycle()
         dragBaseBitmap = null
@@ -664,29 +745,34 @@ class EditorActivity : ComponentActivity() {
     }
 
     /**
-     * A finished LASSO-mode gesture. The backend cannot tell a lasso from a move, so the decision is
-     * made here from the current selection: a gesture that *starts inside* the selection box is a move
-     * (by the start→end delta), otherwise it is a new lasso polygon. The live preview (see
-     * [previewLasso]) tracks the same decision; this is the authoritative commit at pen-up.
+     * A finished LASSO-mode gesture. The backend cannot tell a lasso from a drag, so the decision is
+     * made here from what is currently picked out: a gesture starting inside the selection box moves
+     * the selected strokes, one starting on a circled image moves or resizes it, and anything else
+     * draws a new lasso — each by the start→end delta. The live preview (see [previewLasso]) tracks
+     * the same decision from the same pen-down; this is the authoritative commit at pen-up.
      */
     private fun handleLassoGesture(points: List<StrokePoint>) {
         if (points.isEmpty()) return
         val selection = selection
         val start = points.first()
+        val end = points.last()
+        val startPoint = Vec2(start.x, start.y)
+        val imageDrag = imageDragFor(startPoint)
         if (selection != null && selection.bounds.contains(start.x, start.y)) {
-            val end = points.last()
             commitMove(selection, dx = end.x - start.x, dy = end.y - start.y)
+        } else if (imageDrag != null) {
+            commitImageDrag(imageDrag, dx = end.x - start.x, dy = end.y - start.y)
         } else {
             applyLasso(points.map { Vec2(it.x, it.y) })
         }
     }
 
     /**
-     * Acts on a new lasso [polygon]: selects every active-layer stroke it fully encloses, and — as an
-     * independent outcome — marks the link it circles (if any) for the edit/delete actions. A circle
-     * can do both, one, or neither. A circle that catches no strokes still clears the stroke selection
-     * but keeps any circled link, so a link-only circle is possible (the link's affordance is already
-     * on the page, so no decoration is needed for it).
+     * Acts on a new lasso [polygon]: selects every active-layer stroke it fully encloses, and — as
+     * independent outcomes — marks the link and the image it circles (if any) for their own actions. A
+     * circle can do all of these, some, or none. A circle that catches no strokes still clears the
+     * stroke selection but keeps a circled link or image, so a link-only or image-only circle is
+     * possible: circling an image is how you pick it up to move, resize, or delete it.
      */
     private fun applyLasso(polygon: List<Vec2>) {
         val session = session ?: return
@@ -694,12 +780,15 @@ class EditorActivity : ComponentActivity() {
         val layer = session.page.layers.first { it.id == layerId }
         val ids = lassoSelect(layer.strokes, polygon).toSet()
         uiCircledLink = circledLinkId(session, polygon)
+        uiCircledImage = layer.images.firstOrNull { lassoCoversRegion(it.rect, polygon) }?.id
         if (ids.isEmpty()) {
             selection = null
             selectionPolygon = null
             updateSelectionUi()
             // Repaint to wipe the lasso preview the backend left on the surface (as the eraser does).
-            presentComposite()
+            // Through [present], so a circle that caught no strokes but did catch an image still draws
+            // that image's frame.
+            present()
             return
         }
         selection = SelectionState.of(layerId, layer.strokes.filter { it.id in ids })
@@ -772,14 +861,18 @@ class EditorActivity : ComponentActivity() {
         scheduleAutosave()
     }
 
-    /** Clears the selection and wipes its decorations. Present-wise a no-op when nothing was selected. */
+    /** Clears the selection and wipes its decorations. Present-wise a no-op when nothing was showing. */
     private fun clearSelection() {
-        val had = selection != null
+        // An image frame is an overlay decoration like the selection box, so dropping either needs a
+        // repaint to wipe it. A circled link needs none — its affordance is painted into the page
+        // composite itself and stays there.
+        val had = selection != null || uiCircledImage != null
         selection = null
         selectionPolygon = null
-        // A circled link is part of the same lasso outcome as the selection, so it clears with it —
-        // which is how a tool switch (routing through here) drops the circle's edit/delete actions.
+        // A circled link or image is part of the same lasso outcome as the selection, so both clear
+        // with it — which is how a tool switch (routing through here) drops their actions.
         uiCircledLink = null
+        uiCircledImage = null
         // The picker is anchored to a selection, so clearing the selection dismisses it — this is how
         // a tool switch (which routes through here) also closes it. The picker's own scrim blocks the
         // toolbar while it is open, so this never runs with the picker actually up, and the backend
@@ -809,6 +902,196 @@ class EditorActivity : ComponentActivity() {
     /** A deep copy of the stroke with a fresh id and its points shifted by ([dx], [dy]). */
     private fun Stroke.offsetCopy(dx: Float, dy: Float): Stroke =
         copy(id = StrokeId.random(), points = points.map { it.copy(x = it.x + dx, y = it.y + dy) })
+
+    // --- images ------------------------------------------------------------------------------
+
+    /**
+     * Places the picture at [uri] on the active layer, sized to fit the page.
+     *
+     * The file is copied into the notebook rather than referenced where it sits: the picker grants
+     * read access only for this call, and a note that silently loses its pictures when the user
+     * tidies their gallery would be worse than one that costs a little disk.
+     */
+    private fun insertImage(uri: Uri) {
+        val session = session ?: return
+        val notebook = notebook ?: return
+        val layerId = activeLayerId(session)
+        lifecycleScope.launch {
+            val placed = withContext(Dispatchers.IO) {
+                runCatching {
+                    val size = readImageSize(uri) ?: return@runCatching null
+                    val assetRef = contentResolver.openInputStream(uri)?.use { stream ->
+                        storage.importImage(notebook, stream, extensionOf(uri))
+                    } ?: return@runCatching null
+                    PageImage(
+                        id = ImageId.random(),
+                        assetRef = assetRef,
+                        rect = defaultPlacement(size.first, size.second),
+                    )
+                }.onFailure { Log.w(TAG, "Could not import image $uri", it) }.getOrNull()
+            } ?: return@launch
+            session.addImage(layerId, placed)
+            // A photo is continuous tone, which the fast additive e-ink mode renders as a smear of
+            // ghosting; ask for the clean waveform the way erasing does.
+            renderPage(cleanRefresh = true)
+            refreshUndoRedo()
+            scheduleAutosave()
+        }
+    }
+
+    /** The picked image's pixel dimensions, read from its header alone, or null if it is not an image. */
+    private fun readImageSize(uri: Uri): Pair<Int, Int>? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        return if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+            bounds.outWidth to bounds.outHeight
+        } else {
+            null
+        }
+    }
+
+    /** The file type to store the picked image as, from its MIME type; PNG when that is unknown. */
+    private fun extensionOf(uri: Uri): String {
+        val mime = contentResolver.getType(uri) ?: return DEFAULT_IMAGE_EXT
+        return MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: DEFAULT_IMAGE_EXT
+    }
+
+    /**
+     * Where a newly inserted image goes: centred on the page, its aspect ratio kept, scaled to at
+     * most [INSERTED_IMAGE_PAGE_FRACTION] of the surface. Big enough to see and work with, small
+     * enough to leave the page's writing visible around it, and the user resizes from there.
+     */
+    private fun defaultPlacement(sourceWidth: Int, sourceHeight: Int): PageRect {
+        val maxWidth = surfaceWidth * INSERTED_IMAGE_PAGE_FRACTION
+        val maxHeight = surfaceHeight * INSERTED_IMAGE_PAGE_FRACTION
+        val scale = minOf(maxWidth / sourceWidth, maxHeight / sourceHeight)
+        val width = sourceWidth * scale
+        val height = sourceHeight * scale
+        val left = (surfaceWidth - width) / 2f
+        val top = (surfaceHeight - height) / 2f
+        return PageRect(left = left, top = top, right = left + width, bottom = top + height)
+    }
+
+    /** The rectangle of the currently circled image, or null when none is circled or it has gone. */
+    private fun circledImageRect(): PageRect? {
+        val id = uiCircledImage ?: return null
+        val session = session ?: return null
+        return session.page.layers
+            .firstOrNull { it.id == activeLayerId(session) }
+            ?.images?.firstOrNull { it.id == id }
+            ?.rect
+    }
+
+    /** The circled image together with the layer holding it, or null when there is no usable one. */
+    private fun circledImage(): Pair<LayerId, PageImage>? {
+        val id = uiCircledImage ?: return null
+        val session = session ?: return null
+        val layerId = activeLayerId(session)
+        val image = session.page.layers
+            .firstOrNull { it.id == layerId }
+            ?.images?.firstOrNull { it.id == id }
+            ?: return null
+        return layerId to image
+    }
+
+    /**
+     * What a drag starting at [start] does to the circled image: resize it from a corner grip, move it
+     * from anywhere else inside it, or nothing at all when the pen came down elsewhere — in which case
+     * the gesture goes on to be an ordinary lasso.
+     *
+     * Shared by the live preview and the commit so both reach the same verdict from the same pen-down.
+     */
+    private fun imageDragFor(start: Vec2): ImageDrag? {
+        val (layerId, image) = circledImage() ?: return null
+        val grip = ImagePlacement.gripAt(image.rect, start.x, start.y, SelectionRenderer.HANDLE_TOUCH_PX)
+        if (grip == null && !image.rect.contains(start.x, start.y)) return null
+        return ImageDrag(layerId, image, grip)
+    }
+
+    /**
+     * Enters an image drag if [start] grabbed the circled image, and returns whether it did. Renders
+     * [dragBaseBitmap] — the page without that image — so each preview frame is that base plus the
+     * picture redrawn at its current rectangle, exactly as a stroke move works.
+     */
+    private fun beginImageDrag(start: Vec2): Boolean {
+        val session = session ?: return false
+        if (surfaceWidth <= 0 || surfaceHeight <= 0) return false
+        val drag = imageDragFor(start) ?: return false
+        val template = templateResolver.resolve(session.page.templateRef, surfaceWidth, surfaceHeight)
+        renderer.renderFull(session.page, template, excludeImageIds = setOf(drag.image.id))
+        dragBaseBitmap?.recycle()
+        val base = Bitmap.createBitmap(surfaceWidth, surfaceHeight, Bitmap.Config.ARGB_8888)
+            .also { dragBaseBitmap = it }
+        Canvas(base).drawBitmap(renderer.composite(), 0f, 0f, null)
+        // Restore the shared composite to the full page, so a cancel or a zero-delta commit repaints
+        // from it without a stale exclusion (as [beginMoveDrag] does).
+        renderer.renderFull(session.page, template)
+        imageDrag = drag
+        imageDragRect = drag.image.rect
+        return true
+    }
+
+    /** Presents [dragBaseBitmap] with the dragged image and its frame redrawn at the current rectangle. */
+    private fun presentImageDrag() {
+        val base = dragBaseBitmap ?: return
+        val drag = imageDrag ?: return
+        val rect = imageDragRect ?: return
+        val scratch = decorationScratch() ?: return
+        val canvas = Canvas(scratch)
+        canvas.drawBitmap(base, 0f, 0f, null)
+        imageResolver.resolve(drag.image.copy(rect = rect))?.let { bitmap ->
+            canvas.drawBitmap(bitmap, null, RectF(rect.left, rect.top, rect.right, rect.bottom), imagePreviewPaint)
+        }
+        selectionRenderer.drawImageFrame(canvas, rect)
+        backend.presentDuringCapture(scratch)
+    }
+
+    /**
+     * Commits a finished image drag as one undoable step. A drag that left the image exactly where it
+     * was just repaints, to wipe the preview the backend left on the surface.
+     */
+    private fun commitImageDrag(drag: ImageDrag, dx: Float, dy: Float) {
+        val session = session ?: return
+        val rect = drag.rectAfter(dx, dy)
+        if (!session.setImageRect(drag.layerId, drag.image.id, rect)) {
+            present()
+            return
+        }
+        refreshUndoRedo()
+        // Moving a picture uncovers what was beneath it, which the fast additive e-ink mode leaves
+        // ghosted — the same reason erasing asks for the clean waveform.
+        renderPage(cleanRefresh = true)
+        scheduleAutosave()
+    }
+
+    /** Removes the circled image as one undoable step. */
+    private fun deleteCircledImage() {
+        val session = session ?: return
+        val (layerId, image) = circledImage() ?: return
+        uiCircledImage = null
+        if (!session.removeImage(layerId, image.id)) return
+        refreshUndoRedo()
+        renderPage(cleanRefresh = true)
+        scheduleAutosave()
+    }
+
+    /**
+     * One image drag in flight: which picture, on which layer, and by which corner (null when the
+     * whole image is being moved). Holds the image as it was at pen-down, so every frame is computed
+     * from the original rectangle and the total delta rather than accumulating rounding.
+     */
+    private class ImageDrag(
+        val layerId: LayerId,
+        val image: PageImage,
+        val grip: ImageGrip?,
+    ) {
+        fun rectAfter(dx: Float, dy: Float): PageRect =
+            if (grip == null) {
+                ImagePlacement.moved(image.rect, dx, dy)
+            } else {
+                ImagePlacement.resized(image.rect, grip, dx, dy, MIN_IMAGE_SIZE_PX)
+            }
+    }
 
     // --- link target picker ----------------------------------------------------------------
 
@@ -864,7 +1147,7 @@ class EditorActivity : ComponentActivity() {
      */
     private fun createLink(bounds: SelectionBounds, targetNotebook: Notebook, targetPageId: PageId) {
         val session = session ?: return
-        val region = LinkRegion(
+        val region = PageRect(
             left = bounds.left - LINK_REGION_PADDING_PX,
             top = bounds.top - LINK_REGION_PADDING_PX,
             right = bounds.right + LINK_REGION_PADDING_PX,
@@ -1000,6 +1283,7 @@ class EditorActivity : ComponentActivity() {
         selection = null
         selectionPolygon = null
         uiCircledLink = null
+        uiCircledImage = null
         updateSelectionUi()
         refreshUndoRedo()
         refreshLayers()
@@ -1096,6 +1380,50 @@ class EditorActivity : ComponentActivity() {
         }
         pendingChromeReenable = resume
         surfaceView.postDelayed(resume, CHROME_REFRESH_MS)
+    }
+
+    /**
+     * Queues the repaint that swaps the panel's raw wet ink for the smoothed stroke, once the pen has
+     * been still for [SMOOTHING_SETTLE_MS].
+     *
+     * Only a [PenBackend.rendersWetInkNatively] backend needs this. There the hardware paints the
+     * stroke as it is drawn, so what stays on the panel is the path the pen took, not the smoothed
+     * one the page now holds; without a repaint the two disagree until some later structural change.
+     *
+     * The repaint cannot simply follow the stroke, because blitting suspends pen capture and a writer
+     * starts the next stroke within a few tens of milliseconds — landing the dead window mid-word.
+     * Waiting for the pen to settle puts it in the gap between words instead, and
+     * [PenBackend.Listener.onGestureStarted] cancels it if the pen comes back down first. During
+     * continuous writing it therefore never fires, and the strokes reconcile at the first pause.
+     */
+    private fun scheduleSmoothingSettle() {
+        cancelSmoothingSettle()
+        if (uiSmoothing == SmoothingLevel.OFF) return
+        val settle = Runnable {
+            pendingSmoothingSettle = null
+            presentComposite()
+        }
+        pendingSmoothingSettle = settle
+        surfaceView.postDelayed(settle, SMOOTHING_SETTLE_MS)
+    }
+
+    private fun cancelSmoothingSettle() {
+        pendingSmoothingSettle?.let { surfaceView.removeCallbacks(it) }
+        pendingSmoothingSettle = null
+    }
+
+    /**
+     * Steps the smoothing setting to the next level, wrapping back to off, and remembers it. The
+     * toolbar offers one control rather than three because the levels are an intensity, not a choice
+     * between unrelated modes.
+     */
+    private fun cycleSmoothing() {
+        val levels = SmoothingLevel.entries
+        uiSmoothing = levels[(uiSmoothing.ordinal + 1) % levels.size]
+        prefs.smoothing = uiSmoothing
+        backend.setInkSmoothing(uiSmoothing)
+        // Turning smoothing off leaves nothing to reconcile; a queued settle would only flash.
+        if (uiSmoothing == SmoothingLevel.OFF) cancelSmoothingSettle()
     }
 
     /**
@@ -1421,7 +1749,7 @@ class EditorActivity : ComponentActivity() {
                 EinkToggle(stringResource(R.string.action_lasso), selected = uiLasso) { withChromeRefresh { selectLasso() } }
                 // The selection action bar lives in the toolbar so its buttons sit in the already-excluded
                 // strip (no dynamic raw-drawing exclude rect) and appearing does not resize the canvas.
-                if (uiHasSelection || uiCircledLink != null || uiClipboardHasContent) {
+                if (uiHasSelection || uiCircledLink != null || uiCircledImage != null || uiClipboardHasContent) {
                     ToolbarDivider()
                     if (uiHasSelection) {
                         EinkButton(stringResource(R.string.action_copy)) { withChromeRefresh { copySelection() } }
@@ -1436,6 +1764,11 @@ class EditorActivity : ComponentActivity() {
                     if (uiCircledLink != null) {
                         EinkButton(stringResource(R.string.action_edit_link)) { withChromeRefresh { editCircledLink() } }
                         EinkButton(stringResource(R.string.action_delete_link)) { withChromeRefresh { deleteCircledLink() } }
+                    }
+                    // Shown whenever a lasso circled an image. Moving and resizing it are pen gestures
+                    // on the image itself, so deleting is the only action that needs a button.
+                    if (uiCircledImage != null) {
+                        EinkButton(stringResource(R.string.action_delete_image)) { withChromeRefresh { deleteCircledImage() } }
                     }
                     if (uiClipboardHasContent) {
                         EinkButton(stringResource(R.string.action_paste)) { withChromeRefresh { pasteClipboard() } }
@@ -1453,12 +1786,27 @@ class EditorActivity : ComponentActivity() {
                 EinkToggle(stringResource(R.string.shade_light), selected = uiShade == InkShade.LIGHT) { withChromeRefresh { setShade(InkShade.LIGHT) } }
                 ToolbarDivider()
 
+                // One cycling control rather than three toggles: the levels are an intensity, and the
+                // toolbar is already wide enough to wrap onto a second line.
+                val smoothingLabel = when (uiSmoothing) {
+                    SmoothingLevel.OFF -> R.string.smoothing_off
+                    SmoothingLevel.LIGHT -> R.string.smoothing_light
+                    SmoothingLevel.STRONG -> R.string.smoothing_strong
+                }
+                EinkToggle(stringResource(smoothingLabel), selected = uiSmoothing != SmoothingLevel.OFF) { withChromeRefresh { cycleSmoothing() } }
+                ToolbarDivider()
+
                 EinkButton(stringResource(R.string.action_undo), enabled = uiCanUndo) { withChromeRefresh { undo() } }
                 EinkButton(stringResource(R.string.action_redo), enabled = uiCanRedo) { withChromeRefresh { redo() } }
                 ToolbarDivider()
 
                 EinkToggle(stringResource(R.string.action_layers), selected = uiLayersOpen) { toggleLayersPanel() }
                 EinkToggle(stringResource(R.string.action_template), selected = uiTemplateOpen) { toggleTemplatePanel() }
+                EinkButton(stringResource(R.string.action_insert_image)) {
+                    withChromeRefresh {
+                        imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    }
+                }
                 ToolbarDivider()
 
                 // The step-back through link jumps, shown only when there is somewhere to step back to.
@@ -1669,6 +2017,22 @@ class EditorActivity : ComponentActivity() {
          * e-ink panel before raw drawing resumes (see [withChromeRefresh]). Tune on device.
          */
         private const val CHROME_REFRESH_MS = 100L
+
+/**
+ * How long the pen must be still before the smoothed strokes are blitted over the panel's raw wet
+ * ink. Long enough to sit in the gap between words rather than between two strokes of one letter,
+ * short enough that the correction still reads as immediate.
+ */
+private const val SMOOTHING_SETTLE_MS = 300L
+
+/** How much of the page a freshly inserted image may cover, before the user resizes it. */
+private const val INSERTED_IMAGE_PAGE_FRACTION = 0.4f
+
+/** Stored file type for a picked image whose MIME type the system does not name. */
+private const val DEFAULT_IMAGE_EXT = "png"
+
+/** Smallest an image may be resized to on either side, so it stays big enough to grab again. */
+private const val MIN_IMAGE_SIZE_PX = 48f
 
         /** Eraser disc radius, in page pixels, hit-tested at each gesture point. */
         private const val ERASER_RADIUS = 20f

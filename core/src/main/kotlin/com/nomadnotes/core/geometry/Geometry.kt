@@ -1,6 +1,6 @@
 package com.nomadnotes.core.geometry
 
-import com.nomadnotes.core.LinkRegion
+import com.nomadnotes.core.PageRect
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import kotlin.math.sqrt
@@ -71,7 +71,7 @@ fun lassoSelect(strokes: List<Stroke>, polygon: List<Vec2>): List<StrokeId> {
  * As with [lassoSelect], [polygon] is treated as a closed loop, and a polygon with fewer than
  * three vertices circles nothing.
  */
-fun lassoCoversRegion(region: LinkRegion, polygon: List<Vec2>): Boolean {
+fun lassoCoversRegion(region: PageRect, polygon: List<Vec2>): Boolean {
     if (polygon.size < 3) return false
     return pointInPolygon(region.centerX, region.centerY, polygon)
 }

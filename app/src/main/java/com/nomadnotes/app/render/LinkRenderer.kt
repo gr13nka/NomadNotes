@@ -4,8 +4,8 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
-import com.nomadnotes.core.LinkRegion
 import com.nomadnotes.core.PageLink
+import com.nomadnotes.core.PageRect
 
 /**
  * Draws the tap-to-jump affordance for each [PageLink] onto a [Canvas] — a thin gray rounded box
@@ -40,7 +40,7 @@ class LinkRenderer {
         for (link in links) drawAffordance(canvas, link.region)
     }
 
-    private fun drawAffordance(canvas: Canvas, region: LinkRegion) {
+    private fun drawAffordance(canvas: Canvas, region: PageRect) {
         canvas.drawRoundRect(
             region.left, region.top, region.right, region.bottom,
             CORNER_RADIUS, CORNER_RADIUS, boxPaint,

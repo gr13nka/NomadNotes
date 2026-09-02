@@ -8,6 +8,7 @@ import android.os.Looper
 import android.view.SurfaceView
 import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
+import com.nomadnotes.core.ink.SmoothingLevel
 import com.nomadnotes.pen.onyx.OnyxHiddenApi
 import com.nomadnotes.pen.onyx.OnyxRawDrawingController
 
@@ -62,6 +63,7 @@ class OnyxPenBackend(
     // thread, so the listener is called directly — no marshalling.
     private val lassoCollector = GestureCollector(
         stylusOnly = true,
+        onStarted = { listener?.onGestureStarted() },
         onSample = { points -> listener?.onLassoMove(points.last()) },
         onFinished = { points -> listener?.onLassoGesture(points) },
         onCancelled = { listener?.onLassoGesture(emptyList()) },
@@ -84,6 +86,7 @@ class OnyxPenBackend(
             // reads the mode the editor last set; the erase channel is the hardware side button.
             onDrawingGesture = { points -> mainHandler.post { routeDrawingGesture(points) } },
             onEraseGesture = { points -> mainHandler.post { this.listener?.onEraseGesture(points) } },
+            onGestureStarted = { mainHandler.post { this.listener?.onGestureStarted() } },
         )
         this.controller = controller
         controller.setStrokeAppearance(tool, widthBase, grayLevel)
@@ -124,6 +127,9 @@ class OnyxPenBackend(
         this.grayLevel = grayLevel
         controller?.setStrokeAppearance(tool, widthBase, grayLevel)
     }
+
+    // The panel paints its own wet ink, so there is no preview here to smooth.
+    override fun setInkSmoothing(level: SmoothingLevel) = Unit
 
     override fun present(composite: Bitmap, cleanRefresh: Boolean) {
         controller?.renderToScreen(composite, cleanRefresh)

@@ -42,13 +42,15 @@ import com.onyx.android.sdk.pen.data.TouchPointList
  * layout rectangles are known, [resume]/[pause] from the Activity's onResume/onPause, and [close]
  * from onDestroy.
  *
- * Threading: Onyx delivers raw-input callbacks on its own input thread, so [onDrawingGesture] and
- * [onEraseGesture] may run off the main thread; the caller marshals them as its contract requires.
+ * Threading: Onyx delivers raw-input callbacks on its own input thread, so [onGestureStarted],
+ * [onDrawingGesture] and [onEraseGesture] may run off the main thread; the caller marshals them as
+ * its contract requires.
  */
 class OnyxRawDrawingController(
     private val surfaceView: SurfaceView,
     private val onDrawingGesture: (List<StrokePoint>) -> Unit,
     private val onEraseGesture: (List<StrokePoint>) -> Unit = {},
+    private val onGestureStarted: () -> Unit = {},
 ) {
 
     // Configuration the caller has chosen, re-applied verbatim whenever raw drawing is (re)opened:
@@ -79,6 +81,10 @@ class OnyxRawDrawingController(
     private val callback = object : RawInputCallback() {
         override fun onBeginRawDrawing(shortcut: Boolean, point: TouchPoint?) {
             Log.i(TAG, "onBeginRawDrawing at (${point?.x}, ${point?.y})")
+            // The pen-down edge, reported before any points exist. The caller needs it to abandon
+            // deferred repaints: [renderToScreen] suspends capture while it blits, which would eat
+            // part of the stroke now starting.
+            onGestureStarted()
         }
 
         override fun onEndRawDrawing(shortcut: Boolean, point: TouchPoint?) {

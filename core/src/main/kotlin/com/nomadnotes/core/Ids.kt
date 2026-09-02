@@ -57,3 +57,11 @@ value class LinkId(val value: String) {
         fun random(): LinkId = LinkId(UUID.randomUUID().toString())
     }
 }
+
+@JvmInline
+@Serializable
+value class ImageId(val value: String) {
+    companion object {
+        fun random(): ImageId = ImageId(UUID.randomUUID().toString())
+    }
+}

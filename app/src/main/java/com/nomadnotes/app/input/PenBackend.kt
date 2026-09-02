@@ -5,6 +5,7 @@ import android.graphics.Rect
 import android.view.SurfaceView
 import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
+import com.nomadnotes.core.ink.SmoothingLevel
 
 /**
  * How a pen gesture is captured, which fixes both whether in-progress ink is shown and how a
@@ -59,6 +60,16 @@ interface PenBackend {
     fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int)
 
     /**
+     * How much the in-progress ink preview should be smoothed, so a backend that draws its own wet
+     * ink can show roughly the stroke that will be committed rather than the raw samples.
+     *
+     * A hint, not an instruction: a backend whose hardware paints the wet ink has no say over how it
+     * looks and ignores this, exactly as a backend without e-ink ghosting ignores
+     * [present]'s `cleanRefresh`. Applies to subsequent gestures.
+     */
+    fun setInkSmoothing(level: SmoothingLevel)
+
+    /**
      * True when the hardware paints the wet stroke itself while the pen is down (the Onyx e-ink
      * panel), so a just-finished stroke is already on screen and the editor must not [present] it —
      * only persist it. False when the backend has no hardware ink and every visible change needs a
@@ -96,6 +107,17 @@ interface PenBackend {
      * pressure); backends normalize device pressure values before constructing the points.
      */
     interface Listener {
+        /**
+         * The pen touched down and a gesture is now being captured, in whichever [captureMode] is
+         * current. Reported for its timing alone — it carries no points, and the gesture's own
+         * callback still delivers the whole path when it finishes.
+         *
+         * It exists so the editor can drop deferred work that must not run while the pen is down: on
+         * a backend whose hardware paints its own wet ink, a repaint has to briefly suspend capture,
+         * which would swallow part of the stroke being drawn.
+         */
+        fun onGestureStarted()
+
         /** A drawing gesture finished: its full path, to be turned into a stroke. */
         fun onStrokeFinished(points: List<StrokePoint>)
 

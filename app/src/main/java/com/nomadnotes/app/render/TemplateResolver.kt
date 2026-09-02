@@ -1,7 +1,6 @@
 package com.nomadnotes.app.render
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -82,7 +81,7 @@ class TemplateResolver(private val templatesDir: File) {
     private fun resolveUserImage(ref: String, filename: String): Bitmap? {
         // A get bumps the ref to most-recently-used; a put may evict (and recycle) the eldest.
         userCache[ref]?.let { return it }
-        val decoded = decodeSampled(File(templatesDir, filename)) ?: run {
+        val decoded = decodeSampled(File(templatesDir, filename), width, height) ?: run {
             Log.w(TAG, "Template image missing or unreadable, showing a blank page: $filename")
             return null
         }
@@ -134,30 +133,6 @@ class TemplateResolver(private val templatesDir: File) {
         val top = (height - drawH) / 2f
         canvas.drawBitmap(source, null, RectF(left, top, left + drawW, top + drawH), IMAGE_PAINT)
         return out
-    }
-
-    /**
-     * Decodes [file] downsampled to roughly the surface size, so a large photo does not allocate a
-     * full-resolution bitmap only to be scaled down. Returns null if the file is absent or not a
-     * decodable image.
-     */
-    private fun decodeSampled(file: File): Bitmap? {
-        if (!file.isFile) return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.path, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight)
-        }
-        return BitmapFactory.decodeFile(file.path, options)
-    }
-
-    private fun sampleSize(srcWidth: Int, srcHeight: Int): Int {
-        var sample = 1
-        while (srcWidth / (sample * 2) >= width && srcHeight / (sample * 2) >= height) {
-            sample *= 2
-        }
-        return sample
     }
 
     private fun clearCaches() {

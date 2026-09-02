@@ -1,12 +1,15 @@
 package com.nomadnotes.core.edit
 
+import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.Layer
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.LinkId
 import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageImage
 import com.nomadnotes.core.PageLink
+import com.nomadnotes.core.PageRect
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 
@@ -153,6 +156,38 @@ class PageEditSession(initialPage: Page) {
         val link = page.links.firstOrNull { it.id == id } ?: return false
         if (link.targetNotebookId == targetNotebookId && link.targetPageId == targetPageId) return false
         commit(SetLinkTarget(id, targetNotebookId, targetPageId))
+        return true
+    }
+
+    /**
+     * Places [image] on the layer, above any images already there and beneath all of its ink. The
+     * caller owns identity: pass an image with a fresh [ImageId], or the inverse would remove the
+     * wrong one (see [pasteStrokes]).
+     */
+    fun addImage(layerId: LayerId, image: PageImage) {
+        commit(AddImage(layerId, image))
+    }
+
+    /**
+     * Removes the image with [id] from the layer. Returns false without changing anything when no
+     * image on that layer has that id.
+     */
+    fun removeImage(layerId: LayerId, id: ImageId): Boolean {
+        val layer = page.layerOrThrow(layerId)
+        if (layer.images.none { it.id == id }) return false
+        commit(RemoveImage(layerId, id))
+        return true
+    }
+
+    /**
+     * Moves and resizes the image with [id] to occupy [rect]. Returns false without changing
+     * anything when no image on the layer has that id, or when it already occupies exactly [rect].
+     */
+    fun setImageRect(layerId: LayerId, id: ImageId, rect: PageRect): Boolean {
+        val layer = page.layerOrThrow(layerId)
+        val image = layer.images.firstOrNull { it.id == id } ?: return false
+        if (image.rect == rect) return false
+        commit(SetImageRect(layerId, id, rect))
         return true
     }
 

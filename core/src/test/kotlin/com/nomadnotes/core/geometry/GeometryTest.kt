@@ -1,6 +1,6 @@
 package com.nomadnotes.core.geometry
 
-import com.nomadnotes.core.LinkRegion
+import com.nomadnotes.core.PageRect
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import com.nomadnotes.core.StrokePoint
@@ -113,7 +113,7 @@ class GeometryTest {
     @Test
     fun `lassoCoversRegion is true when the region center is inside the polygon`() {
         // The square encloses the region, so its centre (5,5) reads as circled.
-        val region = LinkRegion(3f, 3f, 7f, 7f)
+        val region = PageRect(3f, 3f, 7f, 7f)
         assertTrue(lassoCoversRegion(region, square))
     }
 
@@ -121,13 +121,13 @@ class GeometryTest {
     fun `lassoCoversRegion is false when the polygon only clips a corner`() {
         // The square overlaps the region's lower-left corner, but the region's centre (14,14)
         // is outside the square, so the link is not circled.
-        val region = LinkRegion(8f, 8f, 20f, 20f)
+        val region = PageRect(8f, 8f, 20f, 20f)
         assertFalse(lassoCoversRegion(region, square))
     }
 
     @Test
     fun `lassoCoversRegion is false for a polygon with fewer than three vertices`() {
-        val region = LinkRegion(3f, 3f, 7f, 7f)
+        val region = PageRect(3f, 3f, 7f, 7f)
         val degenerate = listOf(Vec2(0f, 0f), Vec2(10f, 10f))
         assertFalse(lassoCoversRegion(region, degenerate))
     }

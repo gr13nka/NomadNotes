@@ -38,6 +38,7 @@
     <string name="action_link">Link</string>
     <string name="action_edit_link">Edit link</string>
     <string name="action_delete_link">Delete link</string>
+    <string name="action_delete_image">Delete image</string>
 
     <!-- Editor: link target picker -->
     <string name="link_picker_title">Link to page</string>
@@ -58,11 +59,17 @@
     <string name="shade_dark">Dark</string>
     <string name="shade_light">Light</string>
 
+    <!-- Editor: stroke smoothing, one control cycling through the levels -->
+    <string name="smoothing_off">Smooth: Off</string>
+    <string name="smoothing_light">Smooth: Light</string>
+    <string name="smoothing_strong">Smooth: Strong</string>
+
     <!-- Editor: history and panels -->
     <string name="action_undo">Undo</string>
     <string name="action_redo">Redo</string>
     <string name="action_layers">Layers</string>
     <string name="action_template">Template</string>
+    <string name="action_insert_image">Image</string>
 
     <!-- Used only by the raw-drawing SpikeActivity reference screen. -->
     <string name="action_clear">Clear</string>

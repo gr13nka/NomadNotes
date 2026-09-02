@@ -46,7 +46,7 @@ class SerializationTest {
             links = listOf(
                 PageLink(
                     id = LinkId("link-1"),
-                    region = LinkRegion(10f, 20f, 110f, 60f),
+                    region = PageRect(10f, 20f, 110f, 60f),
                     targetNotebookId = NotebookId("nb-target"),
                     targetPageId = PageId("page-target"),
                 ),
@@ -66,6 +66,44 @@ class SerializationTest {
 
         assertTrue(decoded.links.isEmpty())
         assertEquals(1, decoded.formatVersion)
+    }
+
+    @Test
+    fun `layer json without images field decodes with empty images`() {
+        // A page written before images existed simply has no `images` key on its layers; dropping it
+        // from an encoded page reproduces that older on-disk shape.
+        val legacyJson = NotesJson.encodePage(samplePage()).replace(",\"images\":[]", "")
+        assertFalse("precondition: the images key was removed", legacyJson.contains("\"images\""))
+
+        val decoded = NotesJson.decodePage(legacyJson)
+
+        assertTrue(decoded.layers.all { it.images.isEmpty() })
+        assertEquals(1, decoded.formatVersion)
+    }
+
+    @Test
+    fun `a page carrying an image survives an encode-decode roundtrip unchanged`() {
+        val page = samplePage().let { page ->
+            val layer = page.layers.first()
+            page.copy(
+                layers = page.layers.map {
+                    if (it.id == layer.id) {
+                        it.copy(
+                            images = listOf(
+                                PageImage(
+                                    id = ImageId("img-1"),
+                                    assetRef = "photo.png",
+                                    rect = PageRect(10f, 20f, 210f, 180f),
+                                ),
+                            ),
+                        )
+                    } else {
+                        it
+                    }
+                },
+            )
+        }
+        assertEquals(page, NotesJson.decodePage(NotesJson.encodePage(page)))
     }
 
     @Test

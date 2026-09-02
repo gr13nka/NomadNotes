@@ -1,12 +1,14 @@
 package com.nomadnotes.core.edit
 
+import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.LinkId
-import com.nomadnotes.core.LinkRegion
 import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageImage
 import com.nomadnotes.core.PageLink
+import com.nomadnotes.core.PageRect
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
 import com.nomadnotes.core.StrokePoint
@@ -49,7 +51,7 @@ class PageEditSessionTest {
         targetPage: String = "page-target",
     ) = PageLink(
         id = LinkId(id),
-        region = LinkRegion(0f, 0f, 10f, 10f),
+        region = PageRect(0f, 0f, 10f, 10f),
         targetNotebookId = NotebookId(targetNotebook),
         targetPageId = PageId(targetPage),
     )
@@ -411,5 +413,97 @@ class PageEditSessionTest {
         assertEquals(PageEditSession.MAX_UNDO, undos)
         // The oldest change fell off the end, so its stroke can never be undone away.
         assertEquals(listOf(StrokeId("s0")), mainStrokeIds())
+    }
+
+    // --- images ------------------------------------------------------------------------------
+
+    private fun image(id: String, left: Float = 0f, top: Float = 0f) = PageImage(
+        id = ImageId(id),
+        assetRef = "photo.png",
+        rect = PageRect(left = left, top = top, right = left + 100f, bottom = top + 80f),
+    )
+
+    private fun mainImages(): List<PageImage> =
+        session.page.layers.first { it.id == mainLayer }.images
+
+    @Test
+    fun `an added image lands on the layer`() {
+        session.addImage(mainLayer, image("img-1"))
+        assertEquals(listOf(ImageId("img-1")), mainImages().map { it.id })
+    }
+
+    @Test
+    fun `a page starts with no images`() {
+        assertTrue(mainImages().isEmpty())
+    }
+
+    @Test
+    fun `undo removes an added image and redo puts it back`() {
+        session.addImage(mainLayer, image("img-1"))
+
+        assertTrue(session.undo())
+        assertTrue(mainImages().isEmpty())
+
+        assertTrue(session.redo())
+        assertEquals(listOf(ImageId("img-1")), mainImages().map { it.id })
+    }
+
+    @Test
+    fun `removing an image restores it on undo`() {
+        session.addImage(mainLayer, image("img-1"))
+        assertTrue(session.removeImage(mainLayer, ImageId("img-1")))
+        assertTrue(mainImages().isEmpty())
+
+        assertTrue(session.undo())
+        assertEquals(listOf(ImageId("img-1")), mainImages().map { it.id })
+    }
+
+    @Test
+    fun `removing an image that is not there changes nothing`() {
+        session.addImage(mainLayer, image("img-1"))
+        val before = session.page
+
+        assertFalse(session.removeImage(mainLayer, ImageId("absent")))
+        assertEquals(before, session.page)
+    }
+
+    @Test
+    fun `moving and resizing an image is one reversible step`() {
+        session.addImage(mainLayer, image("img-1"))
+        val moved = PageRect(left = 50f, top = 60f, right = 250f, bottom = 220f)
+
+        assertTrue(session.setImageRect(mainLayer, ImageId("img-1"), moved))
+        assertEquals(moved, mainImages().single().rect)
+
+        assertTrue(session.undo())
+        assertEquals(image("img-1").rect, mainImages().single().rect)
+    }
+
+    @Test
+    fun `setting an image to the rectangle it already occupies changes nothing`() {
+        session.addImage(mainLayer, image("img-1"))
+        val before = session.page
+
+        assertFalse(session.setImageRect(mainLayer, ImageId("img-1"), image("img-1").rect))
+        assertEquals(before, session.page)
+        // The no-op must not have consumed the redo stack either.
+        assertTrue(session.undo())
+        assertTrue(session.redo())
+    }
+
+    @Test
+    fun `setting the rectangle of an image that is not there changes nothing`() {
+        val before = session.page
+        assertFalse(session.setImageRect(mainLayer, ImageId("absent"), image("x").rect))
+        assertEquals(before, session.page)
+    }
+
+    @Test
+    fun `an image is untouched by stroke edits on the same layer`() {
+        session.addImage(mainLayer, image("img-1"))
+        session.addStroke(mainLayer, stroke("s-1"))
+        session.eraseStrokes(mainLayer, listOf(StrokeId("s-1")))
+
+        assertEquals(listOf(ImageId("img-1")), mainImages().map { it.id })
     }
 }

@@ -4,8 +4,12 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.PorterDuff
+import android.graphics.Paint
+import android.graphics.RectF
+import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.Page
+import com.nomadnotes.core.PageImage
 import com.nomadnotes.core.PageLink
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
@@ -15,10 +19,12 @@ import com.nomadnotes.core.StrokeId
  * bitmap current as the page is edited.
  *
  * Rendering is layered for cheap incremental updates. Each layer is rasterised once into its own
- * cached bitmap; the composite is those caches blended over a white background, with the page's
- * stationery template (if any) blended in between the two. Because the caches survive between frames,
- * finishing a single stroke costs one stroke draw plus a re-blend of a handful of bitmaps
- * ([appendStroke]) rather than re-rasterising every stroke on the page.
+ * cached bitmap — its images first, then its strokes over them; the composite is those caches
+ * blended over a white background, with the page's stationery template (if any) blended in between
+ * the two. Because the caches survive between frames, finishing a single stroke costs one stroke
+ * draw plus a re-blend of a handful of bitmaps ([appendStroke]) rather than re-rasterising every
+ * stroke on the page. Ink sitting above images within a layer is what lets [appendStroke] paint
+ * straight onto the cache: a new stroke can never need to go *under* something already drawn.
  *
  * Two update paths, and the caller must pick the right one:
  *  - [appendStroke] — a stroke was just *added* on top of a layer; only that layer's cache and the
@@ -28,8 +34,12 @@ import com.nomadnotes.core.StrokeId
  *
  * Not thread-safe, and it owns native bitmap memory: drive it from one (UI) thread, [resize] it to
  * the surface before first use, and [release] it when the surface goes away.
+ *
+ * @param imageResolver supplies the decoded bitmap for each placed image. Null renders pages without
+ *   their pictures, which is what a caller that has none (or cannot decode any) wants. The resolver
+ *   owns the bitmaps it returns; this class only borrows them, and never recycles one.
  */
-class PageRenderer {
+class PageRenderer(private val imageResolver: ImageResolver? = null) {
 
     private val strokeRenderer = StrokeRenderer()
     private val linkRenderer = LinkRenderer()
@@ -79,14 +89,20 @@ class PageRenderer {
     /**
      * Rebuilds every layer cache from [page] and re-blends the composite over [template] (the
      * page's resolved stationery, or null for a blank white page). Call this whenever the page's
-     * strokes, layers, or template change; [appendStroke] is the one exception for a lone new stroke.
+     * strokes, layers, images, or template change; [appendStroke] is the one exception for a lone
+     * new stroke.
      *
-     * [excludeStrokeIds] omits those strokes from every layer, so the composite shows the page *as
-     * if* they were not there. The editor uses this to render the static base behind a live lasso
-     * move — the moving strokes are drawn separately, translated, on top of that base. A later
-     * [renderFull] with the default (empty) set restores them.
+     * [excludeStrokeIds] and [excludeImageIds] omit those strokes and images from every layer, so the
+     * composite shows the page *as if* they were not there. The editor uses this to render the static
+     * base behind a live move or resize — the thing being dragged is drawn separately, at its current
+     * offset, on top of that base. A later [renderFull] with the defaults (empty) restores them.
      */
-    fun renderFull(page: Page, template: Bitmap?, excludeStrokeIds: Set<StrokeId> = emptySet()) {
+    fun renderFull(
+        page: Page,
+        template: Bitmap?,
+        excludeStrokeIds: Set<StrokeId> = emptySet(),
+        excludeImageIds: Set<ImageId> = emptySet(),
+    ) {
         if (compositeBitmap == null) return
         templateBitmap = template
         dropCachesForRemovedLayers(page)
@@ -94,6 +110,7 @@ class PageRenderer {
             val bitmap = layerBitmaps.getOrPut(layer.id) { newLayerBitmap() }
             val canvas = Canvas(bitmap)
             canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+            for (image in imagesToDraw(layer.images, excludeImageIds)) drawImage(canvas, image)
             for (stroke in strokesToDraw(layer.strokes, excludeStrokeIds)) strokeRenderer.draw(canvas, stroke)
         }
         layers = page.layers.map { LayerSlot(it.id, it.visible) }
@@ -153,6 +170,18 @@ class PageRenderer {
         }
     }
 
+    /**
+     * Draws one placed image into a layer's cache, scaled to fill its rectangle. An image whose file
+     * is missing or unreadable resolves to null and is simply skipped, leaving the rest of the page
+     * intact — a picture that has gone astray must not cost the reader their handwriting.
+     */
+    private fun drawImage(canvas: Canvas, image: PageImage) {
+        val resolver = imageResolver ?: return
+        val bitmap = resolver.resolve(image) ?: return
+        val rect = image.rect
+        canvas.drawBitmap(bitmap, null, RectF(rect.left, rect.top, rect.right, rect.bottom), IMAGE_PAINT)
+    }
+
     private fun newLayerBitmap(): Bitmap =
         Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
 
@@ -171,6 +200,17 @@ class PageRenderer {
     private data class LayerSlot(val id: LayerId, val visible: Boolean)
 
     internal companion object {
+        /** Filtered scaling keeps an image drawn at other than its decoded size from looking jagged. */
+        private val IMAGE_PAINT = Paint(Paint.FILTER_BITMAP_FLAG)
+
+        /**
+         * The images [renderFull] rasterises for a layer: all of [images], minus any whose id is in
+         * [excluded]. The image counterpart of [strokesToDraw], split out for the same reason — the
+         * exclusion rule is testable without touching an Android graphics surface.
+         */
+        internal fun imagesToDraw(images: List<PageImage>, excluded: Set<ImageId>): List<PageImage> =
+            if (excluded.isEmpty()) images else images.filter { it.id !in excluded }
+
         /**
          * The strokes [renderFull] rasterises for a layer: all of [strokes], minus any whose id is in
          * [excluded]. Split out as a pure function so the exclusion rule — the one piece of the

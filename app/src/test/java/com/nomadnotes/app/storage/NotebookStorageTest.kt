@@ -4,6 +4,7 @@ import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.NotesJson
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -208,5 +209,73 @@ class NotebookStorageTest {
     fun `findNotebookById returns null when no notebook has the id`() {
         storage.createNotebook("Only")
         assertNull(storage.findNotebookById(NotebookId.random()))
+    }
+
+    // --- image assets ---------------------------------------------------------------------------
+
+    @Test
+    fun `an imported image lands inside the notebook and is found by its ref`() {
+        val notebook = storage.createNotebook("Journal")
+
+        val ref = storage.importImage(notebook, "PNGBYTES".byteInputStream(), "png")
+
+        val file = storage.imageFile(notebook, ref)
+        assertEquals("PNGBYTES", file!!.readText())
+        assertEquals(File(File(root, "Journal.nnote"), "images"), file.parentFile)
+        assertTrue("the ref keeps the file type", ref.endsWith(".png"))
+    }
+
+    @Test
+    fun `importing the same picture twice yields two independent assets`() {
+        val notebook = storage.createNotebook("Journal")
+
+        val first = storage.importImage(notebook, "one".byteInputStream(), "png")
+        val second = storage.importImage(notebook, "two".byteInputStream(), "png")
+
+        assertNotEquals(first, second)
+        assertEquals("one", storage.imageFile(notebook, first)!!.readText())
+        assertEquals("two", storage.imageFile(notebook, second)!!.readText())
+    }
+
+    @Test
+    fun `an image ref that no longer has a file resolves to null`() {
+        val notebook = storage.createNotebook("Journal")
+        val ref = storage.importImage(notebook, "bytes".byteInputStream(), "png")
+
+        assertTrue(storage.imageFile(notebook, ref)!!.delete())
+
+        assertNull(storage.imageFile(notebook, ref))
+    }
+
+    @Test
+    fun `an image ref cannot reach outside the notebook`() {
+        val notebook = storage.createNotebook("Journal")
+        File(root, "secret.png").writeText("not yours")
+
+        assertNull(storage.imageFile(notebook, "../../secret.png"))
+        assertNull(storage.imageFile(notebook, "..\\secret.png"))
+        assertNull(storage.imageFile(notebook, ".."))
+        assertNull(storage.imageFile(notebook, ""))
+    }
+
+    @Test
+    fun `deleting a notebook takes its images with it`() {
+        val notebook = storage.createNotebook("Journal")
+        storage.importImage(notebook, "bytes".byteInputStream(), "png")
+        val imagesDir = storage.imagesDir(notebook)
+        assertTrue(imagesDir.isDirectory)
+
+        storage.deleteNotebook("Journal")
+
+        assertFalse(imagesDir.exists())
+    }
+
+    @Test
+    fun `an import leaves no temp file behind`() {
+        val notebook = storage.createNotebook("Journal")
+        storage.importImage(notebook, "bytes".byteInputStream(), "png")
+
+        val leftovers = storage.imagesDir(notebook).listFiles()!!.filter { it.name.endsWith(".tmp") }
+        assertTrue("stray temp files: $leftovers", leftovers.isEmpty())
     }
 }
