@@ -24,9 +24,25 @@ future work — none block Phase 2, which is validated on device.
 ## Links: features
 
 4. **Finger-tap navigation.** Tap links with a finger while the pen keeps writing.
-   Needs a device spike (does the firmware deliver finger MotionEvents while raw
-   drawing is enabled?) and a palm-rejection story — a resting palm must not
-   trigger jumps.
+   **Spike answered on device, 2026-09-17 — the firmware does deliver finger input while raw
+   drawing is enabled, and `TouchHelper.enableFingerTouch` was never needed** (every observation
+   below was taken with it `OFF`):
+   - *Delivered?* Yes. 240 finger MotionEvents with `rawDrawing=ON`; **73 of them reached the
+     SurfaceView's own listener**, which is where production would read them.
+   - *Multi-touch?* Yes. `ACTION_POINTER_DOWN`/`UP` fire, pointerCount reaches 2, and the
+     multi-pointer events reach the SurfaceView.
+   - *Pen and finger together?* Yes. At the kernel layer 8 finger contacts began **inside** a
+     pen-down span while the pen was drawing; at app level stylus and finger events interleave in
+     one session.
+   - *Resting palm?* A palm alone produces **no events at all** — the touch controller rejects it
+     below the app (two separate captures, zero events). A palm resting **while the pen writes**
+     does get through, as a 10-pointer blob at kernel pressure 255 against a fingertip's 25-37.
+   - *Contact size is unavailable.* `ABS_MT_TOUCH_MAJOR` is never emitted, and `getTouchMajor()`
+     and `getSize()` are `0.0` in every MotionEvent. Palm rejection must use **pressure**:
+     fingertips read 0.039-0.18 normalized (p50 0.094), a palm saturates at 1.0.
+   - *Caveat.* Roughly half the finger events reach `dispatchTouchEvent` but not the SurfaceView
+     (143 vs 73), and 5 finger streams ended in `CANCEL`. If the gesture recognizer proves lossy
+     reading from the backend's listener, feed it from an Activity-level dispatch hook instead.
 5. **Copy/paste preserves links.** Copying a selection that forms a link region
    should carry the link; paste creates a new link (new id, same target) over the
    pasted strokes.
@@ -41,13 +57,28 @@ future work — none block Phase 2, which is validated on device.
 
 ## Images and smoothing
 
-8. **Tune the smoothing levels on device.** `SmoothingLevel.LIGHT`/`STRONG` map to RDP tolerances
-   (1.2 px / 3.0 px) and a 2.5 px resample spacing, picked by eye rather than from real firmware
-   point streams. Adjust against actual handwriting; relates to item 1, since the same digitizer
-   noise is what makes region-wide taps misclassify.
-9. **Confirm the settle blit never lands mid-stroke.** `SMOOTHING_SETTLE_MS` is 300 ms and a
-   pen-down cancels it (`PenBackend.Listener.onGestureStarted`). If a fast writer ever sees a
-   dropped or truncated stroke with smoothing on, that window is the first suspect.
+8. **Finish the smoothing calibration against real prose.** Largely done, 2026-09. Smoothing now
+   defaults to `SmoothingLevel.AUTO`, which derives its tolerance per stroke: the smaller of a tremor
+   budget and a fraction of the stroke's own shape scale (`min(bboxW, bboxH)`), so a tolerance that
+   merely tidies a signature can no longer swallow a small letter. Measured over 115 real strokes:
+   tremor runs p50 0.10 px / p95 0.44 px, while the old `LIGHT`/`STRONG` tolerances were 1.2 px and
+   3.0 px — 3-7x the noise they were meant to remove, which is why they ate letter shape rather than
+   jitter. At `STRONG` a sub-40 px stroke was reduced to 2.7 knots, i.e. very nearly a straight line.
+   The old 2.5 px resample spacing was also coarser than the digitizer's own 1.57 px median sampling,
+   so it decimated small hands instead of refitting them; it is now 1.2 px. `LIGHT`/`STRONG` remain in
+   the enum as named fixed tunings but have left the toolbar, which is now a plain AUTO/OFF toggle.
+   **Remaining:** re-run `SmoothingCalibrationReport` against a page of the author's ordinary prose
+   (the corpus so far is `test.nnote`, which is closer to test marks than handwriting) and re-apply
+   the selection rule.
+
+9. **Confirm the settle blit never lands mid-stroke.** Still open, and now live for the first time:
+   the default was `OFF` until 2026-09, so this path had never run in ordinary use. `SMOOTHING_SETTLE_MS`
+   was raised 300 ms -> 700 ms, since gaps between strokes within a word are ~100-300 ms while gaps
+   between words are ~600 ms and up — 300 ms sat inside the intra-word band. A guard inside the settle
+   Runnable would add nothing: both it and the `onGestureStarted` post are main-thread, so
+   `removeCallbacks` ordering already decides the race. Needs a fast writer on device to confirm no
+   stroke is ever dropped or truncated.
+
 10. **Orphaned image assets are never collected.** Deleting a page (or undoing an image insert past
     the undo cap) leaves its file in `<notebook>.nnote/images/`. Deleting the whole notebook still
     cleans up, since the directory goes with it. A sweep comparing files against the refs on every
@@ -56,6 +87,22 @@ future work — none block Phase 2, which is validated on device.
     decode time (`ImageResolver`). If photographs look too coarse, the alternatives are a finer
     matrix, error diffusion (at the cost of a stable pattern across partial refreshes), or leaving
     more levels to the firmware.
+
+12. **Smoothing cannot denoise a curved stroke, by construction.** Simplification keeps original
+    samples as knots and the Catmull-Rom spline passes exactly through them, so this is an
+    interpolating scheme, not an averaging one — it has no mechanism to cancel noise. Swept against a
+    noiseless reference glyph, deviation never improved at any tolerance: it denoises only where the
+    tolerance exceeds the noise *and* the true shape carries no detail at that scale, which is why a
+    jittered straight line comes out straight while a jittered loop does not come out cleaner. What
+    AUTO does deliver is an evenly spaced, curvature-continuous path that stays on the ink the pen
+    laid down. If device use shows tremor is still visible on curves, the fix is an approximating
+    fit (least-squares / moving average before simplification), not a larger tolerance — a larger
+    tolerance only costs letter form.
+13. **The pen-speed term in AUTO is inert and should probably go.** `tremorBudgetGain` modulates the
+    tremor budget by median sample spacing. Swept 1.0..3.0 over real ink, the selection rule chose
+    1.0 — no speed dependence at all. It is kept only so the prose corpus (item 8) can re-decide; if
+    that run selects 1.0 again, delete it and `medianSampleSpacingPx` rather than keep machinery that
+    does nothing.
 
 ## Accepted deferrals (from Phase 2 reviews)
 
