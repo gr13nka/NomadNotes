@@ -1,0 +1,3 @@
+# Raw getevent captures from the finger probe: large, machine-specific, and already
+# distilled into docs/BACKLOG.md item 4. Keep the script, not its output.
+finger-probe-runs/

@@ -69,6 +69,10 @@ class OnyxRawDrawingController(
     private var drawingEnabled = false
     private var wetInkEnabled = true
 
+    // Off by default, matching TouchHelper's own default before this is ever called — the finger
+    // probe (see setFingerTouchEnabled) is what determines whether flipping it does anything.
+    private var fingerTouchEnabled = false
+
     // Device pressure range, read once. TouchPoint.pressure is a raw device value; the StrokePoint
     // contract requires 0..1, so points are divided by this. Guarded against a nonpositive reading.
     private val maxPressure: Float by lazy {
@@ -154,6 +158,7 @@ class OnyxRawDrawingController(
         touchHelper.setStrokeStyle(strokeStyle)
         touchHelper.setStrokeColor(strokeColor)
         touchHelper.setRawDrawingRenderEnabled(wetInkEnabled)
+        touchHelper.enableFingerTouch(fingerTouchEnabled)
         // Route the stylus side button to erasing, so hardware-side erase reaches onEraseGesture.
         touchHelper.enableSideBtnErase(true)
         rawDrawingOpen = true
@@ -202,6 +207,25 @@ class OnyxRawDrawingController(
         wetInkEnabled = enabled
         if (rawDrawingOpen) touchHelper.setRawDrawingRenderEnabled(enabled)
     }
+
+    /**
+     * Whether the panel lets finger touches through to the ordinary View event stream while raw
+     * drawing is enabled. Firmware-dependent — see the 2026-09 finger probe
+     * (docs/BACKLOG.md item 4) — rather than a documented SDK guarantee; two-finger undo and the
+     * finger-plus-pen lasso gesture both depend on the answer. Takes effect immediately if raw
+     * drawing is open, and is re-applied verbatim on a region reopen (see [setExcludeRects]). A
+     * no-op if unchanged.
+     */
+    fun setFingerTouchEnabled(enabled: Boolean) {
+        if (fingerTouchEnabled == enabled) return
+        fingerTouchEnabled = enabled
+        if (rawDrawingOpen) touchHelper.enableFingerTouch(enabled)
+    }
+
+    // PROBE ONLY: gives OnyxTouchProbeKnobs (same module) a way to reach the live TouchHelper
+    // instance for its four speculative firmware settings without widening this class's own public
+    // surface. Delete alongside OnyxTouchProbeKnobs and the finger probe.
+    internal fun touchHelperForProbe(): TouchHelper = touchHelper
 
     /**
      * Replaces the excluded regions (e.g. when a measured toolbar moves). TouchHelper fixes its
