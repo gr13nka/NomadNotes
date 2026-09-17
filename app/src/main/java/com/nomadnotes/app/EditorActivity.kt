@@ -254,7 +254,7 @@ class EditorActivity : ComponentActivity() {
     private var uiLasso by mutableStateOf(false)
     private var uiWidth by mutableStateOf(StrokeWidth.M)
     private var uiShade by mutableStateOf(InkShade.BLACK)
-    private var uiSmoothing by mutableStateOf(SmoothingLevel.OFF)
+    private var uiSmoothing by mutableStateOf(SmoothingLevel.AUTO)
     private var uiCanUndo by mutableStateOf(false)
     private var uiCanRedo by mutableStateOf(false)
     private var uiPageIndex by mutableStateOf(0)
@@ -1413,13 +1413,17 @@ class EditorActivity : ComponentActivity() {
     }
 
     /**
-     * Steps the smoothing setting to the next level, wrapping back to off, and remembers it. The
-     * toolbar offers one control rather than three because the levels are an intensity, not a choice
-     * between unrelated modes.
+     * Flips smoothing between off and [SmoothingLevel.AUTO], and remembers it. Once AUTO derives its
+     * strength per stroke there is nothing left to hunt for, so this is a toggle rather than the old
+     * cycle through hand-picked levels — a cycle existed only so the user could search for a level
+     * they liked, and each step costs a Compose chrome refresh on e-ink. Off stays reachable because
+     * "ink exactly what I drew" is a legitimate choice, not a level to tune past.
+     *
+     * A value a previous build stored as [SmoothingLevel.LIGHT] or [SmoothingLevel.STRONG] self-heals
+     * here: the first press lands on AUTO or OFF like any other stored level would.
      */
-    private fun cycleSmoothing() {
-        val levels = SmoothingLevel.entries
-        uiSmoothing = levels[(uiSmoothing.ordinal + 1) % levels.size]
+    private fun toggleSmoothing() {
+        uiSmoothing = if (uiSmoothing == SmoothingLevel.OFF) SmoothingLevel.AUTO else SmoothingLevel.OFF
         prefs.smoothing = uiSmoothing
         backend.setInkSmoothing(uiSmoothing)
         // Turning smoothing off leaves nothing to reconcile; a queued settle would only flash.
@@ -1786,14 +1790,15 @@ class EditorActivity : ComponentActivity() {
                 EinkToggle(stringResource(R.string.shade_light), selected = uiShade == InkShade.LIGHT) { withChromeRefresh { setShade(InkShade.LIGHT) } }
                 ToolbarDivider()
 
-                // One cycling control rather than three toggles: the levels are an intensity, and the
-                // toolbar is already wide enough to wrap onto a second line.
+                // A two-state toggle, not a cycling control: AUTO derives its own strength, so there is
+                // no level left for the user to search for.
                 val smoothingLabel = when (uiSmoothing) {
                     SmoothingLevel.OFF -> R.string.smoothing_off
+                    SmoothingLevel.AUTO -> R.string.smoothing_auto
                     SmoothingLevel.LIGHT -> R.string.smoothing_light
                     SmoothingLevel.STRONG -> R.string.smoothing_strong
                 }
-                EinkToggle(stringResource(smoothingLabel), selected = uiSmoothing != SmoothingLevel.OFF) { withChromeRefresh { cycleSmoothing() } }
+                EinkToggle(stringResource(smoothingLabel), selected = uiSmoothing != SmoothingLevel.OFF) { withChromeRefresh { toggleSmoothing() } }
                 ToolbarDivider()
 
                 EinkButton(stringResource(R.string.action_undo), enabled = uiCanUndo) { withChromeRefresh { undo() } }
@@ -2022,8 +2027,20 @@ class EditorActivity : ComponentActivity() {
  * How long the pen must be still before the smoothed strokes are blitted over the panel's raw wet
  * ink. Long enough to sit in the gap between words rather than between two strokes of one letter,
  * short enough that the correction still reads as immediate.
+ *
+ * Intra-word gaps run roughly 100-300 ms; gaps between words run upward of 600 ms. 700 ms sits past
+ * the intra-word band, so the settle lands in a pause between words rather than mid-letter. The cost
+ * is that the panel shows raw rather than settled ink for longer — at most an epsilon or two of
+ * pixels' difference. This window used to matter only when smoothing was hand-enabled; now that
+ * [SmoothingLevel.AUTO] is the default it runs in normal use, which is why it needed re-tuning (see
+ * docs/BACKLOG.md item 9).
+ *
+ * Deliberately no "pen is down" guard inside [scheduleSmoothingSettle]'s Runnable: it would add
+ * nothing. The post and the Runnable both run on the main thread, so either
+ * [PenBackend.Listener.onGestureStarted]'s `removeCallbacks` already won by the time this would fire,
+ * or it did not run yet — in which case a flag would not be set either.
  */
-private const val SMOOTHING_SETTLE_MS = 300L
+private const val SMOOTHING_SETTLE_MS = 700L
 
 /** How much of the page a freshly inserted image may cover, before the user resizes it. */
 private const val INSERTED_IMAGE_PAGE_FRACTION = 0.4f

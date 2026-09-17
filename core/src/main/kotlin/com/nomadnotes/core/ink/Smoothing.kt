@@ -3,6 +3,7 @@ package com.nomadnotes.core.ink
 import com.nomadnotes.core.StrokePoint
 import kotlin.math.ceil
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
@@ -13,7 +14,23 @@ import kotlin.math.sqrt
  * thresholds each level implies are an implementation detail of [smoothStroke], so they can be
  * retuned against real firmware without changing anything a caller stores or displays.
  */
-enum class SmoothingLevel { OFF, LIGHT, STRONG }
+enum class SmoothingLevel {
+    OFF,
+
+    /**
+     * Derives its tolerance from the stroke itself (see [autoTuning]) rather than spending a
+     * fixed pixel budget, so one setting suits both a word-long cursive stroke and a single
+     * printed letter.
+     *
+     * AUTO describes a *finished* stroke: its tolerance depends on the whole stroke's bounding
+     * box and median sample spacing, both of which change as more points arrive. Smoothing a
+     * prefix of a stroke with AUTO therefore does not produce a prefix of the final result — a
+     * caller that smooths incrementally (a live preview, say) cannot assume otherwise.
+     */
+    AUTO,
+    LIGHT,
+    STRONG,
+}
 
 /**
  * Returns [points] with digitizer jitter removed and the remaining path refitted as a smooth
@@ -23,7 +40,8 @@ enum class SmoothingLevel { OFF, LIGHT, STRONG }
  * tremor and the redundant points a slow pen leaves behind while keeping the corners that carry the
  * letter's shape. The survivors are then treated as the knots of a centripetal Catmull–Rom spline and
  * resampled at a fixed spacing, which puts back a dense, evenly spaced path that follows a curve
- * rather than a chain of straight hops.
+ * rather than a chain of straight hops. [SmoothingLevel.AUTO] additionally picks the simplification
+ * tolerance from the stroke itself instead of a fixed constant; see [autoTuning].
  *
  * The result is still a plain point list, so nothing downstream has to know smoothing happened: the
  * renderer draws the refitted curve with the same per-segment lines it already uses.
@@ -42,12 +60,37 @@ enum class SmoothingLevel { OFF, LIGHT, STRONG }
  * produces); the ordering of the output is only as good as the input's.
  */
 fun smoothStroke(points: List<StrokePoint>, level: SmoothingLevel): List<StrokePoint> {
-    val tuning = tuningFor(level) ?: return points
+    if (level == SmoothingLevel.OFF) return points
     if (points.size < MIN_SMOOTHABLE_POINTS) return points
     // Repeated positions are common when the pen rests, and would put zero-length segments into the
     // spline's parameterization, which divides by their length.
     val distinct = withoutRepeatedPositions(points)
     if (distinct.size < MIN_SMOOTHABLE_POINTS) return points
+    // Tuning is chosen from the de-duplicated stroke, not the raw capture: AUTO's speed term reads
+    // median sample spacing, and a resting pen's repeated samples would otherwise report that as
+    // zero — read as an infinitely slow pen — and spend the full tremor budget exactly when the pen
+    // isn't trembling, it's stopped.
+    val tuning = tuningFor(level, distinct)
+    return smoothDistinct(points, distinct, tuning)
+}
+
+/**
+ * [smoothStroke] with the tuning supplied rather than derived — the calibration report sweeps
+ * candidate constants through the very code the app runs.
+ */
+internal fun smoothStrokeTuned(points: List<StrokePoint>, epsilonPx: Float, spacingPx: Float): List<StrokePoint> {
+    if (points.size < MIN_SMOOTHABLE_POINTS) return points
+    val distinct = withoutRepeatedPositions(points)
+    if (distinct.size < MIN_SMOOTHABLE_POINTS) return points
+    return smoothDistinct(points, distinct, Tuning(epsilonPx, spacingPx))
+}
+
+/**
+ * The simplify-then-refit pipeline shared by [smoothStroke] and [smoothStrokeTuned], once a
+ * [Tuning] has been chosen and [points] de-duplicated into [distinct]. This is the only place
+ * either entry point turns a tuning into pixels, so they cannot drift apart.
+ */
+private fun smoothDistinct(points: List<StrokePoint>, distinct: List<StrokePoint>, tuning: Tuning): List<StrokePoint> {
     val knots = simplify(distinct, tuning.epsilonPx)
     if (knots.size < 2) return points
     return resample(knots, tuning.spacingPx, first = points.first(), last = points.last())
@@ -111,12 +154,121 @@ private class Tuning(
     val spacingPx: Float,
 )
 
-// Device-tuned against the Boox Go 10.3 panel; expect these to move after a device pass.
-private fun tuningFor(level: SmoothingLevel): Tuning? = when (level) {
-    SmoothingLevel.OFF -> null
-    SmoothingLevel.LIGHT -> Tuning(epsilonPx = 1.2f, spacingPx = 2.5f)
-    SmoothingLevel.STRONG -> Tuning(epsilonPx = 3.0f, spacingPx = 2.5f)
+private fun tuningFor(level: SmoothingLevel, stroke: List<StrokePoint>): Tuning = when (level) {
+    SmoothingLevel.AUTO -> autoTuning(stroke)
+    SmoothingLevel.LIGHT -> Tuning(LIGHT_EPSILON_PX, RESAMPLE_SPACING_PX)
+    SmoothingLevel.STRONG -> Tuning(STRONG_EPSILON_PX, RESAMPLE_SPACING_PX)
+    SmoothingLevel.OFF -> error("OFF is answered before a tuning is chosen")
 }
+
+/**
+ * The simplification tolerance for [SmoothingLevel.AUTO], derived from the stroke rather than fixed.
+ *
+ * Two measurements pull in opposite directions. *Tremor* — [TREMOR_PX] — is an additive error of
+ * roughly constant pixel width whatever is being written; it sets how much tolerance simplification
+ * *wants*. *Shape scale* — [shapeScalePx] — is the size of the smallest feature the stroke can
+ * contain (the counter of an `e`, the notch of an `n`); it sets how much the stroke can *afford*.
+ * Tremor is absolute pixels and letters are not — that mismatch is exactly why a single fixed
+ * epsilon serves a capital letter and a comma differently well. Taking `min(wanted, affordable)`
+ * means smoothing can never spend more than the letter can pay.
+ *
+ * A third, explicitly provisional term — [tremorBudgetGain] — scales how much of the tremor budget
+ * is actually spent, from the stroke's median sample spacing (at a fixed digitizer sample rate, that
+ * is pen speed in disguise). Below the tremor width the pen is moving slower than it shakes, so
+ * consecutive samples are mostly noise and the full budget is safe to spend; well above it, every
+ * sample is real motion, so the budget is cut back so a fast corner isn't clipped.
+ */
+private fun autoTuning(stroke: List<StrokePoint>): Tuning =
+    Tuning(
+        epsilonPx = autoEpsilonPx(stroke, MAX_EPSILON_FRACTION_OF_SHAPE, SLOW_PEN_GAIN),
+        spacingPx = RESAMPLE_SPACING_PX,
+    )
+
+/**
+ * [autoTuning]'s epsilon, with [maxEpsilonFractionOfShape] and [slowPenGain] supplied rather than
+ * fixed to the current constants — `SmoothingCalibrationReport`'s entry point for sweeping those two
+ * candidates through the real formula instead of a reimplementation of it that could drift out of
+ * sync.
+ */
+internal fun autoEpsilonPx(stroke: List<StrokePoint>, maxEpsilonFractionOfShape: Float, slowPenGain: Float): Float {
+    val affordable = max(shapeScalePx(stroke), MIN_SHAPE_SCALE_PX) * maxEpsilonFractionOfShape
+    val wanted = TREMOR_PX * tremorBudgetGain(medianSampleSpacingPx(stroke), slowPenGain)
+    return min(wanted, affordable)
+}
+
+/**
+ * The size of the smallest feature [stroke] can contain, in page pixels: the shorter side of its
+ * bounding box, not the diagonal. A diagonal overstates it — in cursive, one stroke is often a whole
+ * word, where the diagonal reports several hundred pixels while the features that matter (the
+ * x-height loops and notches) are a tenth of that.
+ */
+internal fun shapeScalePx(stroke: List<StrokePoint>): Float {
+    var minX = Float.MAX_VALUE
+    var maxX = -Float.MAX_VALUE
+    var minY = Float.MAX_VALUE
+    var maxY = -Float.MAX_VALUE
+    for (point in stroke) {
+        if (point.x < minX) minX = point.x
+        if (point.x > maxX) maxX = point.x
+        if (point.y < minY) minY = point.y
+        if (point.y > maxY) maxY = point.y
+    }
+    return min(maxX - minX, maxY - minY)
+}
+
+/**
+ * The true median distance between consecutive samples of [stroke], in page pixels. Median rather
+ * than mean so a single paused instant — a cluster of near-zero spacings — cannot drag the estimate
+ * down as far as it would drag an average. Sorts a private copy: [stroke] may be a list the caller
+ * still holds a reference to.
+ */
+internal fun medianSampleSpacingPx(stroke: List<StrokePoint>): Float {
+    if (stroke.size < 2) return 0f
+    val spacings = FloatArray(stroke.size - 1)
+    for (i in 1 until stroke.size) {
+        spacings[i - 1] = distance(stroke[i - 1].x, stroke[i - 1].y, stroke[i].x, stroke[i].y)
+    }
+    spacings.sort()
+    val mid = spacings.size / 2
+    return if (spacings.size % 2 == 0) (spacings[mid - 1] + spacings[mid]) / 2f else spacings[mid]
+}
+
+/**
+ * Clamped linear interpolation between [slowPenGain] at [SLOW_SPACING_PX] and [FAST_PEN_GAIN] at
+ * [FAST_SPACING_PX]. Provisional: swept and selected by `SmoothingCalibrationReport`, not derived
+ * from first principles, and a candidate that fails to earn its keep there should be deleted rather
+ * than kept out of caution. [slowPenGain] is a parameter rather than always [SLOW_PEN_GAIN] so the
+ * report can sweep it through this exact function.
+ */
+private fun tremorBudgetGain(medianSpacingPx: Float, slowPenGain: Float): Float {
+    if (medianSpacingPx <= SLOW_SPACING_PX) return slowPenGain
+    if (medianSpacingPx >= FAST_SPACING_PX) return FAST_PEN_GAIN
+    val t = (medianSpacingPx - SLOW_SPACING_PX) / (FAST_SPACING_PX - SLOW_SPACING_PX)
+    return slowPenGain + t * (FAST_PEN_GAIN - slowPenGain)
+}
+
+// Measured from 115 real strokes pulled off the author's Boox Go 10.3 (test.nnote) — see
+// SmoothingCalibrationReport, which recomputes these percentiles from any corpus and sweeps the
+// swept-marked constants below. All of them are in page pixels, so they are specific to this
+// panel's pixel density; re-run the report rather than eyeball new numbers for other hardware.
+private const val TREMOR_PX = 0.45f // p95 of measured digitizer tremor (p50 0.10, p99 1.0 px)
+// What SmoothingCalibrationReport's selection rule picked over the 2026-09 corpus: the lowest value
+// swept, and the only bucket it changes is the small one, where the tremor budget does not bind.
+// Every larger value trades small-letter form away for nothing — a big stroke is already governed by
+// TREMOR_PX, so it does not notice.
+private const val MAX_EPSILON_FRACTION_OF_SHAPE = 0.02f
+private const val MIN_SHAPE_SCALE_PX = 8.0f // p10 of measured stroke extent
+internal const val RESAMPLE_SPACING_PX = 1.2f // below the 1.57px native median sample spacing, so it refits instead of decimating
+private const val SLOW_SPACING_PX = 0.5f // p10 of measured sample spacing
+private const val FAST_SPACING_PX = 4.0f // p90 of measured sample spacing
+// Both 1.0, which makes the pen-speed term inert: the calibration report swept it 1.0..3.0 over real
+// ink and selected the bottom of the range, i.e. no speed dependence at all. Kept rather than deleted
+// only so the next corpus can re-decide it — if the author's prose run selects 1.0 again, delete
+// tremorBudgetGain and medianSampleSpacingPx with it rather than leave machinery that does nothing.
+private const val SLOW_PEN_GAIN = 1.0f
+private const val FAST_PEN_GAIN = 1.0f
+private const val LIGHT_EPSILON_PX = 1.2f // unchanged, merely named now
+private const val STRONG_EPSILON_PX = 3.0f // unchanged, merely named now
 
 /** Drops points that sit exactly where the previous one did, keeping the rest in order. */
 private fun withoutRepeatedPositions(points: List<StrokePoint>): List<StrokePoint> {

@@ -59,8 +59,9 @@
     <string name="shade_dark">Dark</string>
     <string name="shade_light">Light</string>
 
-    <!-- Editor: stroke smoothing, one control cycling through the levels -->
+    <!-- Editor: stroke smoothing, a two-state toggle between off and auto -->
     <string name="smoothing_off">Smooth: Off</string>
+    <string name="smoothing_auto">Smooth: Auto</string>
     <string name="smoothing_light">Smooth: Light</string>
     <string name="smoothing_strong">Smooth: Strong</string>
 

@@ -19,12 +19,17 @@ class EditorPrefs(context: Context) {
 
     /**
      * How much a finished stroke is smoothed before it becomes ink.
-     * Defaults to [SmoothingLevel.OFF], so the app inks exactly what was drawn until asked otherwise.
+     * Defaults to [SmoothingLevel.AUTO], which derives a strength from each stroke, so there is
+     * nothing left to tune by hand.
+     *
+     * Read back by name, with an unreadable value falling back to the default: a file written by an
+     * older build (e.g. [SmoothingLevel.LIGHT] or [SmoothingLevel.STRONG]) still loads as itself, and
+     * a name no build of this app ever wrote degrades to the default instead of failing.
      */
     var smoothing: SmoothingLevel
         get() {
-            val stored = prefs.getString(KEY_SMOOTHING, null) ?: return SmoothingLevel.OFF
-            return SmoothingLevel.entries.firstOrNull { it.name == stored } ?: SmoothingLevel.OFF
+            val stored = prefs.getString(KEY_SMOOTHING, null) ?: return SmoothingLevel.AUTO
+            return SmoothingLevel.entries.firstOrNull { it.name == stored } ?: SmoothingLevel.AUTO
         }
         set(value) {
             prefs.edit().putString(KEY_SMOOTHING, value.name).apply()
