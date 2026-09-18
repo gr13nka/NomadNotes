@@ -104,6 +104,23 @@ future work — none block Phase 2, which is validated on device.
     that run selects 1.0 again, delete it and `medianSampleSpacingPx` rather than keep machinery that
     does nothing.
 
+## Things-style chrome — implementation
+
+Spec: `docs/superpowers/specs/2026-09-18-things-eink-ui-design.md` (mockups alongside). Build
+only after the mockups are approved.
+
+1. **Tokens.** Geist in `res/font`, a three-step `Typography`, and spacing and state tokens in
+   `ui/Eink.kt`. Controls read the tokens instead of per-call-site sizes.
+2. **Editor bar.** Replace the `EditorToolbar` `FlowRow` with the five-glyph bar and its
+   selection mode. Turn `EditorOverlays` into anchored Tool, Page and More panels. Reuse
+   `updateToolbarExclude`, `updateBackendEnabled` and `withChromeRefresh`. Add a "Hide toolbar"
+   state.
+3. **Two-pane library.** Rework `NotebookListActivity` into a sidebar and a page grid, with
+   inline rename and create. Needs a start-page extra for `EditorActivity` and a page-thumbnail
+   renderer that caches on save.
+4. **Quick Find.** A name-only index (notebooks, Recent pages), plus a backlinks query over
+   `PageLink`. The heading search waits for Phase 3.
+
 ## Accepted deferrals (from Phase 2 reviews)
 
 - Dialogs do not suppress the pen backend (inherited Phase-1 pattern).
