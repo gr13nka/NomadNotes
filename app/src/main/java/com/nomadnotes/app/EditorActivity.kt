@@ -242,9 +242,9 @@ class EditorActivity : ComponentActivity() {
     // cancel it, and so onPause can drop it before we background.
     private var pendingChromeReenable: Runnable? = null
 
-    // A pending repaint that replaces the hardware's raw wet ink with the smoothed strokes, posted
-    // after a stroke and cancelled by the next pen-down (see [scheduleSmoothingSettle]).
-    private var pendingSmoothingSettle: Runnable? = null
+    // A pending repaint that swaps the hardware's raw wet ink for our own rendered ink, posted after
+    // a stroke and cancelled by the next pen-down (see [scheduleInkSettle]).
+    private var pendingInkSettle: Runnable? = null
 
     // Toolbar/panel state, hoisted here so the AndroidView canvas can read none of it. The pen
     // listener also reads the drawing ones (tool/width/shade/active layer), but a plain value read
@@ -349,7 +349,7 @@ class EditorActivity : ComponentActivity() {
         pendingChromeReenable?.let { surfaceView.removeCallbacks(it) }
         pendingChromeReenable = null
         // Likewise the settle repaint: backgrounding already repaints, and it must not blit later.
-        cancelSmoothingSettle()
+        cancelInkSettle()
         // Drop the transient target picker so we do not resume onto a stale overlay.
         uiLinkPicker = null
         backend.setEnabled(false)
@@ -539,7 +539,7 @@ class EditorActivity : ComponentActivity() {
     private val penListener = object : PenBackend.Listener {
         override fun onGestureStarted() {
             // The pen is down again: abandon the settle repaint rather than blit through the stroke.
-            cancelSmoothingSettle()
+            cancelInkSettle()
         }
 
         override fun onStrokeFinished(points: List<StrokePoint>) {
@@ -570,7 +570,7 @@ class EditorActivity : ComponentActivity() {
             // not paint wet ink itself: on Onyx the panel already shows this stroke, and a per-stroke
             // blit there (with raw drawing briefly disabled) is exactly what delays the next stroke.
             renderer.appendStroke(layerId, stroke)
-            if (!backend.rendersWetInkNatively) presentComposite() else scheduleSmoothingSettle()
+            if (!backend.rendersWetInkNatively) presentComposite() else scheduleInkSettle()
             refreshUndoRedo()
             scheduleAutosave()
         }
@@ -1383,33 +1383,37 @@ class EditorActivity : ComponentActivity() {
     }
 
     /**
-     * Queues the repaint that swaps the panel's raw wet ink for the smoothed stroke, once the pen has
-     * been still for [SMOOTHING_SETTLE_MS].
+     * Queues the repaint that swaps the panel's raw wet ink for our own rendered ink, once the pen
+     * has been still for [INK_SETTLE_MS].
      *
      * Only a [PenBackend.rendersWetInkNatively] backend needs this. There the hardware paints the
-     * stroke as it is drawn, so what stays on the panel is the path the pen took, not the smoothed
-     * one the page now holds; without a repaint the two disagree until some later structural change.
+     * stroke with its own nib as it is drawn, so what stays on the panel is the hardware's ink, not
+     * the tapered/curved ink the renderer draws for the committed page; without a repaint the two
+     * disagree until some later structural change. This is no longer about smoothing — our ink
+     * differs from the hardware's wet ink even with smoothing OFF — so it always runs.
      *
      * The repaint cannot simply follow the stroke, because blitting suspends pen capture and a writer
      * starts the next stroke within a few tens of milliseconds — landing the dead window mid-word.
      * Waiting for the pen to settle puts it in the gap between words instead, and
      * [PenBackend.Listener.onGestureStarted] cancels it if the pen comes back down first. During
      * continuous writing it therefore never fires, and the strokes reconcile at the first pause.
+     * [INK_SETTLE_MS] balances the two ends of that gap: 200ms sits closer to the stroke than the ink
+     * mismatch really needs, but still lands between letters for most writers; going much below
+     * ~150ms risks clipping a fast writer's very next stroke instead.
      */
-    private fun scheduleSmoothingSettle() {
-        cancelSmoothingSettle()
-        if (uiSmoothing == SmoothingLevel.OFF) return
+    private fun scheduleInkSettle() {
+        cancelInkSettle()
         val settle = Runnable {
-            pendingSmoothingSettle = null
+            pendingInkSettle = null
             presentComposite()
         }
-        pendingSmoothingSettle = settle
-        surfaceView.postDelayed(settle, SMOOTHING_SETTLE_MS)
+        pendingInkSettle = settle
+        surfaceView.postDelayed(settle, INK_SETTLE_MS)
     }
 
-    private fun cancelSmoothingSettle() {
-        pendingSmoothingSettle?.let { surfaceView.removeCallbacks(it) }
-        pendingSmoothingSettle = null
+    private fun cancelInkSettle() {
+        pendingInkSettle?.let { surfaceView.removeCallbacks(it) }
+        pendingInkSettle = null
     }
 
     /**
@@ -1422,8 +1426,6 @@ class EditorActivity : ComponentActivity() {
         uiSmoothing = levels[(uiSmoothing.ordinal + 1) % levels.size]
         prefs.smoothing = uiSmoothing
         backend.setInkSmoothing(uiSmoothing)
-        // Turning smoothing off leaves nothing to reconcile; a queued settle would only flash.
-        if (uiSmoothing == SmoothingLevel.OFF) cancelSmoothingSettle()
     }
 
     /**
@@ -2019,11 +2021,12 @@ class EditorActivity : ComponentActivity() {
         private const val CHROME_REFRESH_MS = 100L
 
 /**
- * How long the pen must be still before the smoothed strokes are blitted over the panel's raw wet
- * ink. Long enough to sit in the gap between words rather than between two strokes of one letter,
- * short enough that the correction still reads as immediate.
+ * How long the pen must be still before our own rendered ink is blitted over the panel's raw wet
+ * ink (see [scheduleInkSettle]). 200ms sits closer to the stroke than the old 300ms while still
+ * landing in the gap between words rather than between two strokes of one letter; much below
+ * ~150ms risks clipping a fast writer's very next stroke instead.
  */
-private const val SMOOTHING_SETTLE_MS = 300L
+private const val INK_SETTLE_MS = 200L
 
 /** How much of the page a freshly inserted image may cover, before the user resizes it. */
 private const val INSERTED_IMAGE_PAGE_FRACTION = 0.4f

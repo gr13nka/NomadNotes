@@ -1,9 +1,12 @@
 package com.nomadnotes.core.ink
 
 import com.nomadnotes.core.StrokePoint
-import kotlin.math.ceil
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.exp
+import kotlin.math.PI
 import kotlin.math.max
-import kotlin.math.roundToLong
+import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
@@ -16,17 +19,24 @@ import kotlin.math.sqrt
 enum class SmoothingLevel { OFF, LIGHT, STRONG }
 
 /**
- * Returns [points] with digitizer jitter removed and the remaining path refitted as a smooth
- * curve — the "auto-smoothing" applied to a stroke as it is committed.
+ * Returns [points] with digitizer jitter removed — the "auto-smoothing" applied to a stroke as
+ * it is committed.
  *
- * Two stages. First the path is simplified (Ramer–Douglas–Peucker), which drops the sample-to-sample
- * tremor and the redundant points a slow pen leaves behind while keeping the corners that carry the
- * letter's shape. The survivors are then treated as the knots of a centripetal Catmull–Rom spline and
- * resampled at a fixed spacing, which puts back a dense, evenly spaced path that follows a curve
- * rather than a chain of straight hops.
+ * Three stages. [smoothPath] first nudges interior positions with an arc-length Gaussian average
+ * of their neighbours (corners excepted), which is what actually removes tremor: a threshold can
+ * only drop points, it cannot move one closer to the "true" line — and because the averaging
+ * window is sized in page pixels rather than sample count, it reaches hand wobble's wavelength
+ * regardless of how densely the digitizer happened to sample. [simplify] (Ramer–Douglas–Peucker)
+ * then drops the points the smoothed path no longer needs to keep its shape. [splitLongSpans]
+ * puts a few back wherever that left two knots far enough apart to cut a visible corner across
+ * real curvature — a slack RDP tolerance would otherwise straighten.
  *
- * The result is still a plain point list, so nothing downstream has to know smoothing happened: the
- * renderer draws the refitted curve with the same per-segment lines it already uses.
+ * The result is a *sparse* list of knots, each one still a captured sample with its own pressure
+ * and timestamp — smoothing only ever nudges a position, by about the level's epsilon at most.
+ * It is not a path to draw directly: it is the knot list of a centripetal Catmull–Rom curve, and
+ * a caller renders it through [inkCurve] or [inkOutline]. Knots stay within about epsilon of the
+ * captured path, and the rendered curve within about 1.5x epsilon of the knot polyline in turn —
+ * comfortably inside the tolerance eraser and lasso hit-testing already allow on that polyline.
  *
  * Contract relied on by callers:
  *  - [SmoothingLevel.OFF] returns [points] itself, unchanged.
@@ -35,8 +45,6 @@ enum class SmoothingLevel { OFF, LIGHT, STRONG }
  *  - The first and last points are always preserved exactly, including their pressure and
  *    `timestampDelta`. The stroke therefore keeps its total duration, which
  *    `TapClassifier` reads from the last point.
- *  - Interpolated points carry pressure clamped to 0..1 and a `timestampDelta` between those of the
- *    knots they lie between, so timing stays ordered.
  *
  * [points] is expected in capture order, with non-decreasing `timestampDelta` (what every backend
  * produces); the ordering of the output is only as good as the input's.
@@ -44,17 +52,137 @@ enum class SmoothingLevel { OFF, LIGHT, STRONG }
 fun smoothStroke(points: List<StrokePoint>, level: SmoothingLevel): List<StrokePoint> {
     val tuning = tuningFor(level) ?: return points
     if (points.size < MIN_SMOOTHABLE_POINTS) return points
-    // Repeated positions are common when the pen rests, and would put zero-length segments into the
-    // spline's parameterization, which divides by their length.
+    // Repeated positions are common when the pen rests, and would put zero-length segments into
+    // both the corner test and the spline's parameterization, which divides by their length.
     val distinct = withoutRepeatedPositions(points)
     if (distinct.size < MIN_SMOOTHABLE_POINTS) return points
-    val knots = simplify(distinct, tuning.epsilonPx)
-    if (knots.size < 2) return points
-    return resample(knots, tuning.spacingPx, first = points.first(), last = points.last())
+    val smoothed = smoothPath(distinct, tuning.sigmaPx)
+    val knots = splitLongSpans(simplify(smoothed, tuning.epsilonPx), smoothed, tuning.maxKnotSpanPx)
+    val result = knots.toMutableList()
+    result[0] = points.first()
+    result[result.size - 1] = points.last()
+    return result
 }
 
 /** Fewest distinct positions a gesture needs before it is treated as a shape worth smoothing. */
 const val MIN_SMOOTHABLE_POINTS = 4
+
+/**
+ * The turn angle beyond which [isCorner] flags a point as a corner: sharper than this and the
+ * point carries the letter's shape, not tremor, so smoothing across it would round the shape away.
+ */
+private val CORNER_COS_THRESHOLD = cos(70.0 * PI / 180.0).toFloat()
+
+/**
+ * The position-nudging stage of [smoothStroke]: arc-length Gaussian smoothing at scale [sigmaPx]
+ * page pixels. Sizing the averaging window in pixels rather than in sample count is the point —
+ * it is what lets this reach hand wobble's 10-30px wavelength no matter how densely or sparsely
+ * the digitizer sampled, unlike a fixed-pass, fixed-tap kernel whose reach is capped by however
+ * many samples happen to fall within a few pixels of each other.
+ *
+ * Both stroke endpoints and every point [isCorner] flags — probed at least [sigmaPx] out, so
+ * wobble at the smoothing scale itself is never mistaken for a corner — are anchors: the path is
+ * split into anchor-to-anchor pieces first, and each piece is smoothed independently of its
+ * neighbours. Anchors carry the letter's real shape, so they never move and never blend across
+ * into an adjacent piece, which keeps this much heavier smoothing from rounding a corner away.
+ */
+internal fun smoothPath(points: List<StrokePoint>, sigmaPx: Float): List<StrokePoint> {
+    if (points.size < 3) return points
+    val probePx = max(CORNER_PROBE_PX, sigmaPx)
+    val anchors = sortedSetOf(0, points.size - 1)
+    for (i in 1 until points.size - 1) {
+        if (isCorner(points, i, probePx)) anchors.add(i)
+    }
+    val anchorList = anchors.toList()
+    val result = points.toMutableList()
+    for (k in 0 until anchorList.size - 1) {
+        smoothPiece(points, anchorList[k], anchorList[k + 1], sigmaPx, result)
+    }
+    return result
+}
+
+/**
+ * Arc-length-weighted Gaussian smoothing of the interior of one corner-to-corner piece
+ * `points[from..to]` (inclusive), writing moved positions into [out]. [from] and [to] — anchors —
+ * never move; each interior point's own sigma shrinks as it nears either end of the piece (down to
+ * a no-op right next to an anchor), so the smoothing fades out approaching a corner rather than
+ * stopping abruptly at it.
+ */
+private fun smoothPiece(points: List<StrokePoint>, from: Int, to: Int, sigmaPx: Float, out: MutableList<StrokePoint>) {
+    if (to - from < 2) return // no interior point to move
+    val arc = FloatArray(to - from + 1)
+    for (i in from + 1..to) {
+        arc[i - from] = arc[i - from - 1] + distance(points[i - 1].x, points[i - 1].y, points[i].x, points[i].y)
+    }
+    val length = arc[to - from]
+    for (i in from + 1 until to) {
+        val s = arc[i - from]
+        val sigma = min(sigmaPx, min(s, length - s) / 2f)
+        if (sigma < 0.25f) continue
+        val window = 3f * sigma
+        var sumX = 0f
+        var sumY = 0f
+        var sumW = 0f
+        for (j in from..to) {
+            val ds = arc[j - from] - s
+            if (abs(ds) > window) continue
+            val w = exp(-(ds * ds) / (2f * sigma * sigma))
+            sumX += w * points[j].x
+            sumY += w * points[j].y
+            sumW += w
+        }
+        out[i] = points[i].copy(x = sumX / sumW, y = sumY / sumW)
+    }
+}
+
+/**
+ * Floor on how far [isCorner] walks along the polyline before comparing directions — arc length,
+ * not a sample count. At slow writing speed Boox samples land only 1-2px apart, close enough that
+ * the immediate-neighbour angle used to swing past 70° on sub-pixel tremor alone; probing this far
+ * out instead stays comfortably above tremor amplitude while staying well under the scale of an
+ * actual letter stroke (6px is about 0.66mm on the ~227dpi Boox Go 10.3 panel). It is only a
+ * floor: [smoothPath] probes farther out at coarser smoothing scales, so that wobble at its own
+ * scale is never misread as a corner either.
+ */
+private const val CORNER_PROBE_PX = 6f
+
+/**
+ * True where [points] bends sharper than [CORNER_COS_THRESHOLD] at index [index], comparing the
+ * directions into and out of it from about [probePx] away on each side — walking the polyline
+ * rather than reading the immediate neighbours, so the test's scale tracks real curvature instead
+ * of however dense this stroke happened to be sampled. A walk that runs out of points before
+ * covering the probe distance settles for the end it reached. A degenerate incoming or outgoing
+ * leg (zero length) has no angle to measure, so it reads as a non-corner.
+ */
+private fun isCorner(points: List<StrokePoint>, index: Int, probePx: Float): Boolean {
+    val current = points[index]
+    val back = walkPolyline(points, index, step = -1, probePx)
+    val forward = walkPolyline(points, index, step = 1, probePx)
+    val inX = current.x - back.x
+    val inY = current.y - back.y
+    val outX = forward.x - current.x
+    val outY = forward.y - current.y
+    val inLength = sqrt(inX * inX + inY * inY)
+    val outLength = sqrt(outX * outX + outY * outY)
+    if (inLength <= 0f || outLength <= 0f) return false
+    val cosAngle = (inX * outX + inY * outY) / (inLength * outLength)
+    return cosAngle < CORNER_COS_THRESHOLD
+}
+
+/** The point [targetPx] of accumulated chord length from `points[from]`, walking in direction
+ *  [step] (+-1) — or the endpoint reached first if the polyline runs out before then. */
+private fun walkPolyline(points: List<StrokePoint>, from: Int, step: Int, targetPx: Float): StrokePoint {
+    var traveled = 0f
+    var i = from
+    while (true) {
+        val next = i + step
+        if (next < 0 || next >= points.size) return points[i]
+        val leg = distance(points[i].x, points[i].y, points[next].x, points[next].y)
+        if (traveled + leg >= targetPx) return points[next]
+        traveled += leg
+        i = next
+    }
+}
 
 /**
  * The subset of [points] that keeps the path's shape to within [epsilonPx] — the Ramer–Douglas–Peucker
@@ -103,135 +231,87 @@ internal fun simplify(points: List<StrokePoint>, epsilonPx: Float): List<StrokeP
     return points.filterIndexed { index, _ -> keep[index] }
 }
 
+/**
+ * Inserts knots back into [knots] wherever two consecutive ones are more than [maxSpanPx] apart,
+ * so a slack [simplify] tolerance cannot cut a visible corner across a span of real curvature
+ * that [smoothPath] never touched. Each gap is closed by the [smoothed] sample nearest its middle
+ * *by index* — not by re-running RDP — repeating on each half until every span fits.
+ *
+ * [knots] must be (as [simplify] guarantees) a subsequence of [smoothed] in the same order and by
+ * the same instances, which is how each knot's position in [smoothed] is found.
+ */
+internal fun splitLongSpans(
+    knots: List<StrokePoint>,
+    smoothed: List<StrokePoint>,
+    maxSpanPx: Float,
+): List<StrokePoint> {
+    if (knots.size < 2 || maxSpanPx <= 0f) return knots
+    val indices = indicesOf(knots, smoothed)
+    val result = ArrayList<StrokePoint>(knots.size)
+    result.add(knots.first())
+    for (i in 0 until knots.size - 1) {
+        appendSplits(result, indices[i], indices[i + 1], smoothed, maxSpanPx)
+        result.add(knots[i + 1])
+    }
+    return result
+}
+
+/** Where each of [knots] sits in [smoothed], found by identity so structurally-equal points at
+ *  different moments of the stroke cannot be confused with one another. */
+private fun indicesOf(knots: List<StrokePoint>, smoothed: List<StrokePoint>): IntArray {
+    val indices = IntArray(knots.size)
+    var searchFrom = 0
+    for (k in knots.indices) {
+        var j = searchFrom
+        while (j < smoothed.size && smoothed[j] !== knots[k]) j++
+        indices[k] = j
+        searchFrom = j + 1
+    }
+    return indices
+}
+
+/** Appends, in order, the [smoothed] samples needed between indices [loIndex] and [hiIndex] so no
+ *  remaining gap exceeds [maxSpanPx]; the endpoints themselves are the caller's responsibility. */
+private fun appendSplits(
+    out: MutableList<StrokePoint>,
+    loIndex: Int,
+    hiIndex: Int,
+    smoothed: List<StrokePoint>,
+    maxSpanPx: Float,
+) {
+    if (hiIndex - loIndex <= 1) return
+    val lo = smoothed[loIndex]
+    val hi = smoothed[hiIndex]
+    if (distance(lo.x, lo.y, hi.x, hi.y) <= maxSpanPx) return
+    val midIndex = (loIndex + hiIndex) / 2
+    appendSplits(out, loIndex, midIndex, smoothed, maxSpanPx)
+    out.add(smoothed[midIndex])
+    appendSplits(out, midIndex, hiIndex, smoothed, maxSpanPx)
+}
+
 /** Per-level tuning, kept private so [SmoothingLevel] stays a plain vocabulary type. */
 private class Tuning(
-    /** How far the simplified path may stray from the captured one, in page pixels. */
+    /** Gaussian smoothing scale, in page pixels — see [smoothPath]. */
+    val sigmaPx: Float,
+    /** How far the smoothed path may stray from itself before [simplify] drops a knot, in page pixels. */
     val epsilonPx: Float,
-    /** Spacing between resampled points along the refitted curve, in page pixels. */
-    val spacingPx: Float,
+    /** Widest gap [splitLongSpans] allows between two consecutive knots, in page pixels. */
+    val maxKnotSpanPx: Float,
 )
 
-// Device-tuned against the Boox Go 10.3 panel; expect these to move after a device pass.
+// Device-tuned against the Boox Go 10.3 panel (about 227dpi, so 1px is roughly 0.11mm); expect
+// these to move after a device pass. Hand wobble runs 10-30px in wavelength, which is what sigmaPx
+// has to reach. LIGHT's 4px sigma (about 0.45mm) tidies that wobble but keeps your letterforms;
+// STRONG's 10px sigma (about 1.1mm) is the Animate-like, aggressively regularizing level — gentle
+// curves become clean arcs, while corners survive regardless, because they are anchors [smoothPath]
+// never smooths across. epsilonPx is smaller than it used to be at both levels: the path entering
+// [simplify] is already smooth, so RDP's job here is only thinning knots, not doing any of the
+// actual smoothing. Reach for a stronger effect by raising sigmaPx, not epsilonPx or maxKnotSpanPx.
 private fun tuningFor(level: SmoothingLevel): Tuning? = when (level) {
     SmoothingLevel.OFF -> null
-    SmoothingLevel.LIGHT -> Tuning(epsilonPx = 1.2f, spacingPx = 2.5f)
-    SmoothingLevel.STRONG -> Tuning(epsilonPx = 3.0f, spacingPx = 2.5f)
+    SmoothingLevel.LIGHT -> Tuning(sigmaPx = 4f, epsilonPx = 1.5f, maxKnotSpanPx = 48f)
+    SmoothingLevel.STRONG -> Tuning(sigmaPx = 10f, epsilonPx = 3f, maxKnotSpanPx = 48f)
 }
-
-/** Drops points that sit exactly where the previous one did, keeping the rest in order. */
-private fun withoutRepeatedPositions(points: List<StrokePoint>): List<StrokePoint> {
-    val kept = ArrayList<StrokePoint>(points.size)
-    for (point in points) {
-        val previous = kept.lastOrNull()
-        if (previous != null && previous.x == point.x && previous.y == point.y) continue
-        kept.add(point)
-    }
-    return kept
-}
-
-/**
- * Walks the centripetal Catmull–Rom spline through [knots], emitting a point roughly every
- * [spacingPx] along it. [first] and [last] are the captured stroke's own endpoints, emitted verbatim
- * so smoothing cannot nudge where the stroke starts or ends.
- */
-private fun resample(
-    knots: List<StrokePoint>,
-    spacingPx: Float,
-    first: StrokePoint,
-    last: StrokePoint,
-): List<StrokePoint> {
-    val smoothed = ArrayList<StrokePoint>(knots.size * 2)
-    smoothed.add(first)
-    for (i in 0 until knots.size - 1) {
-        val start = knots[i]
-        val end = knots[i + 1]
-        // The curve needs a neighbour on each side. At the ends there is none, so reflect the segment
-        // outwards: a mirrored neighbour keeps the knot spacing non-zero (which the parameterization
-        // divides by) and leaves the curve heading straight out of the endpoint.
-        val beforeX: Float
-        val beforeY: Float
-        if (i == 0) {
-            beforeX = 2f * start.x - end.x
-            beforeY = 2f * start.y - end.y
-        } else {
-            beforeX = knots[i - 1].x
-            beforeY = knots[i - 1].y
-        }
-        val afterX: Float
-        val afterY: Float
-        if (i + 2 < knots.size) {
-            afterX = knots[i + 2].x
-            afterY = knots[i + 2].y
-        } else {
-            afterX = 2f * end.x - start.x
-            afterY = 2f * end.y - start.y
-        }
-        val steps = max(1, ceil(distance(start.x, start.y, end.x, end.y) / spacingPx).toInt())
-        // Each step lands on the segment's far knot at u == 1, so the shared knot between two
-        // segments is emitted once. The final knot is skipped and [last] appended instead.
-        val upper = if (i == knots.size - 2) steps - 1 else steps
-        for (step in 1..upper) {
-            smoothed.add(sample(beforeX, beforeY, start, end, afterX, afterY, step.toFloat() / steps))
-        }
-    }
-    smoothed.add(last)
-    return smoothed
-}
-
-/**
- * The spline point a fraction [u] of the way from [start] to [end], given the neighbouring knots
- * either side. Position follows the Barry–Goldman evaluation of a non-uniform Catmull–Rom spline;
- * pressure and timing are interpolated straight between [start] and [end], which is what they mean
- * along that piece of the path.
- *
- * Knots are spaced by the square root of the distance between them (centripetal, alpha = 0.5) rather
- * than uniformly. Pen samples are unevenly spaced, and uniform spacing overshoots and can form cusps
- * on exactly that input; the centripetal spacing provably cannot.
- */
-private fun sample(
-    beforeX: Float,
-    beforeY: Float,
-    start: StrokePoint,
-    end: StrokePoint,
-    afterX: Float,
-    afterY: Float,
-    u: Float,
-): StrokePoint {
-    val t0 = 0f
-    val t1 = t0 + knotSpacing(beforeX, beforeY, start.x, start.y)
-    val t2 = t1 + knotSpacing(start.x, start.y, end.x, end.y)
-    val t3 = t2 + knotSpacing(end.x, end.y, afterX, afterY)
-    val t = t1 + u * (t2 - t1)
-
-    val a1x = ((t1 - t) * beforeX + (t - t0) * start.x) / (t1 - t0)
-    val a1y = ((t1 - t) * beforeY + (t - t0) * start.y) / (t1 - t0)
-    val a2x = ((t2 - t) * start.x + (t - t1) * end.x) / (t2 - t1)
-    val a2y = ((t2 - t) * start.y + (t - t1) * end.y) / (t2 - t1)
-    val a3x = ((t3 - t) * end.x + (t - t2) * afterX) / (t3 - t2)
-    val a3y = ((t3 - t) * end.y + (t - t2) * afterY) / (t3 - t2)
-
-    val b1x = ((t2 - t) * a1x + (t - t0) * a2x) / (t2 - t0)
-    val b1y = ((t2 - t) * a1y + (t - t0) * a2y) / (t2 - t0)
-    val b2x = ((t3 - t) * a2x + (t - t1) * a3x) / (t3 - t1)
-    val b2y = ((t3 - t) * a2y + (t - t1) * a3y) / (t3 - t1)
-
-    return StrokePoint(
-        x = ((t2 - t) * b1x + (t - t1) * b2x) / (t2 - t1),
-        y = ((t2 - t) * b1y + (t - t1) * b2y) / (t2 - t1),
-        pressure = (start.pressure + u * (end.pressure - start.pressure)).coerceIn(0f, 1f),
-        timestampDelta = start.timestampDelta +
-            ((end.timestampDelta - start.timestampDelta) * u).roundToLong(),
-    )
-}
-
-/**
- * Centripetal knot spacing: the square root of the distance between two knots, floored at a tiny
- * positive value so a pair that rounds to the same position cannot divide by zero.
- */
-private fun knotSpacing(x1: Float, y1: Float, x2: Float, y2: Float): Float =
-    max(sqrt(distance(x1, y1, x2, y2)), MIN_KNOT_SPACING)
-
-private const val MIN_KNOT_SPACING = 1e-4f
 
 /** Shortest distance from [point] to the segment [start]-[end], or to the shared point if degenerate. */
 private fun distanceToSegment(point: StrokePoint, start: StrokePoint, end: StrokePoint): Float {
@@ -242,10 +322,4 @@ private fun distanceToSegment(point: StrokePoint, start: StrokePoint, end: Strok
     val t = (((point.x - start.x) * abx) + ((point.y - start.y) * aby)) / lengthSquared
     val clamped = t.coerceIn(0f, 1f)
     return distance(point.x, point.y, start.x + clamped * abx, start.y + clamped * aby)
-}
-
-private fun distance(x1: Float, y1: Float, x2: Float, y2: Float): Float {
-    val dx = x1 - x2
-    val dy = y1 - y2
-    return sqrt(dx * dx + dy * dy)
 }

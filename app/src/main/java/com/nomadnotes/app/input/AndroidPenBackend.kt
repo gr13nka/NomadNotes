@@ -45,8 +45,16 @@ class AndroidPenBackend(
     private var listener: PenBackend.Listener? = null
     private var enabled: Boolean = true
 
-    // Rebuilt by [setStrokeAppearance] so the live preview approximates the committed stroke.
-    private var inkPreviewPaint = strokePaint(Color.BLACK, INK_PREVIEW_WIDTH)
+    // The INK preview draws through the same StrokeRenderer as the committed stroke (see
+    // drawPreview), so it needs one reused instance rather than a paint of its own.
+    private val strokeRenderer = StrokeRenderer()
+
+    // Set by [setStrokeAppearance]; read each INK preview frame so it always draws the current
+    // tool/width/shade, even mid-gesture if the toolbar changes under a still-open panel.
+    private var inkTool: Tool = Tool.PEN
+    private var inkWidthBase: Float = 0f
+    private var inkGrayLevel: Int = 255 // black, per the Stroke model's grayLevel convention
+
     private val erasePreviewPaint = strokePaint(ERASE_PREVIEW_COLOR, ERASE_PREVIEW_WIDTH)
     private val previewPath = Path()
 
@@ -81,11 +89,9 @@ class AndroidPenBackend(
     }
 
     override fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int) {
-        val color = StrokeRenderer.grayLevelToColor(grayLevel)
-        val width = if (tool == Tool.MARKER) widthBase * StrokeRenderer.MARKER_WIDTH_MULTIPLIER else widthBase
-        inkPreviewPaint = strokePaint(color, width).apply {
-            if (tool == Tool.MARKER) alpha = StrokeRenderer.MARKER_ALPHA
-        }
+        inkTool = tool
+        inkWidthBase = widthBase
+        inkGrayLevel = grayLevel
     }
 
     override fun setInkSmoothing(level: SmoothingLevel) {
@@ -166,22 +172,28 @@ class AndroidPenBackend(
 
     private fun drawPreview(canvas: Canvas, points: List<StrokePoint>) {
         if (points.isEmpty()) return
-        val paint = when (captureMode) {
-            CaptureMode.INK -> inkPreviewPaint
-            CaptureMode.ERASE -> erasePreviewPaint
+        when (captureMode) {
+            // pendingEnd = true: the pen is still down, so the far end has no point yet to taper
+            // into — see StrokeRenderer.drawInk.
+            CaptureMode.INK -> strokeRenderer.drawInk(
+                canvas, smoothedSoFar(points), inkTool, inkWidthBase, inkGrayLevel, pendingEnd = true,
+            )
+            CaptureMode.ERASE -> drawErasePreview(canvas, points)
             // The editor renders the lasso preview itself (from onLassoMove), so blitPreview is never
             // called in LASSO mode. Guard defensively.
-            CaptureMode.LASSO -> return
+            CaptureMode.LASSO -> Unit
         }
+    }
+
+    private fun drawErasePreview(canvas: Canvas, points: List<StrokePoint>) {
         if (points.size == 1) {
-            canvas.drawPoint(points[0].x, points[0].y, paint)
+            canvas.drawPoint(points[0].x, points[0].y, erasePreviewPaint)
             return
         }
-        val shown = if (captureMode == CaptureMode.INK) smoothedSoFar(points) else points
         previewPath.reset()
-        previewPath.moveTo(shown[0].x, shown[0].y)
-        for (i in 1 until shown.size) previewPath.lineTo(shown[i].x, shown[i].y)
-        canvas.drawPath(previewPath, paint)
+        previewPath.moveTo(points[0].x, points[0].y)
+        for (i in 1 until points.size) previewPath.lineTo(points[i].x, points[i].y)
+        canvas.drawPath(previewPath, erasePreviewPaint)
     }
 
     /**
@@ -212,9 +224,6 @@ class AndroidPenBackend(
     }
 
     private companion object {
-        /** The preview width before [setStrokeAppearance] runs; the finished stroke replaces it with real ink. */
-        const val INK_PREVIEW_WIDTH = 3f
-
         /** The eraser preview hints its path and rough reach without looking like drawn ink. */
         const val ERASE_PREVIEW_WIDTH = 12f
         const val ERASE_PREVIEW_COLOR = 0x66808080 // translucent gray

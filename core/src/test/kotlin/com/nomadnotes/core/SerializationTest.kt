@@ -162,4 +162,39 @@ class SerializationTest {
         val json = NotesJson.encodePage(samplePage())
         assertTrue("formatVersion default should be emitted", json.contains("\"formatVersion\":1"))
     }
+
+    @Test
+    fun `a point with a nibFactor round-trips it`() {
+        val stroke = sampleStroke("s1").copy(
+            points = listOf(
+                StrokePoint(x = 10f, y = 20f, pressure = 0.4f, timestampDelta = 0L, nibFactor = 0.75f),
+            ),
+        )
+        val page = samplePage().copy(
+            layers = listOf(Layer(id = LayerId("layer-main"), name = "Main", strokes = listOf(stroke))),
+        )
+        val decoded = NotesJson.decodePage(NotesJson.encodePage(page))
+        assertEquals(0.75f, decoded.layers[0].strokes[0].points[0].nibFactor)
+    }
+
+    @Test
+    fun `a point json without a nibFactor key decodes to a null factor`() {
+        // The pre-existing shape: every point already in a stored file has no "nibFactor" key at
+        // all, not an explicit null, since older backends and the touch fallback never wrote one.
+        val json = NotesJson.encodePage(samplePage())
+        assertFalse("precondition: no point carries the key yet", json.contains("nibFactor"))
+
+        val decoded = NotesJson.decodePage(json)
+
+        assertEquals(null, decoded.layers[0].strokes[0].points[0].nibFactor)
+    }
+
+    @Test
+    fun `a null nibFactor is not written, unlike encodeDefaults'd fields`() {
+        // encodeDefaults=true would normally re-emit every default-valued field explicitly (see
+        // `defaults are written explicitly` above); nibFactor opts out of that (EncodeDefault.NEVER)
+        // so a null factor never bloats a point-heavy page with a key that carries no information.
+        val json = NotesJson.encodePage(samplePage())
+        assertFalse("null nibFactor should be omitted, not written as null", json.contains("nibFactor"))
+    }
 }

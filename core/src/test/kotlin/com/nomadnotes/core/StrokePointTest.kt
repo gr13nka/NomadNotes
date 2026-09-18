@@ -6,7 +6,7 @@ import org.junit.Test
 
 /**
  * Proves the :core test infrastructure runs. The assertions also pin down the value-type
- * contract [StrokePoint] relies on (structural equality of its four components).
+ * contract [StrokePoint] relies on (structural equality of its components).
  */
 class StrokePointTest {
 

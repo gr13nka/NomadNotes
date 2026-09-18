@@ -5,7 +5,12 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import com.nomadnotes.core.Stroke
+import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
+import com.nomadnotes.core.ink.NibProfile
+import com.nomadnotes.core.ink.dotRadius
+import com.nomadnotes.core.ink.inkCurve
+import com.nomadnotes.core.ink.inkOutline
 
 /**
  * Renders a single [Stroke] as ink on a [Canvas] — the one place that decides how a stroke's
@@ -14,15 +19,29 @@ import com.nomadnotes.core.Tool
  * It is the single source of truth for that mapping: both the full-page rebuild and the
  * incremental "one new stroke" path in [PageRenderer] draw through here, so the ink a stroke shows
  * the moment it is finished and the ink it keeps after later re-composites are byte-for-byte the
- * same. The tool constants (pressure response, marker weight and opacity) are named privates
- * pending tuning against real hardware.
+ * same. The touch backend's live INK preview draws through the same [drawInk], with
+ * `pendingEnd = true`, so the wet ink under the pen matches the ink [draw] commits once the
+ * gesture ends.
  *
- * Stateless between calls apart from a reused [Paint]/[Path] it mutates each call, so drive one
+ * PEN inks a filled, tapered outline ([inkOutline]); PENCIL and MARKER ink a constant-width cubic
+ * curve ([inkCurve]) instead — both shaped by :core's [NibProfile], the one width law shared with
+ * the touch preview and (separately) :pen-onyx's hardware nib. Only the gray→color mapping is a
+ * named private here, pending tuning against real hardware.
+ *
+ * Stateless between calls apart from the reused [Paint]/[Path] it mutates each call, so drive one
  * instance from a single thread.
  */
 class StrokeRenderer {
 
-    private val paint = Paint().apply {
+    // Fills the tapered PEN outline; a stroked line would double the taper's own edges.
+    private val fillPaint = Paint().apply {
+        isAntiAlias = true
+        style = Paint.Style.FILL
+    }
+
+    // Strokes the constant-width PENCIL/MARKER curve; round caps/joins make the cubic segments
+    // read as one continuous line rather than a chain of visible seams.
+    private val strokePaint = Paint().apply {
         isAntiAlias = true
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
@@ -32,90 +51,95 @@ class StrokeRenderer {
 
     /** Inks [stroke] onto [canvas]. A stroke with no points draws nothing. */
     fun draw(canvas: Canvas, stroke: Stroke) {
-        if (stroke.points.isEmpty()) return
+        drawInk(canvas, stroke.points, stroke.tool, stroke.widthBase, stroke.grayLevel)
+    }
 
-        // Color.rgb resets alpha to opaque each call; the marker branch then makes itself translucent.
-        paint.color = grayLevelToColor(stroke.grayLevel)
-        when (stroke.tool) {
-            Tool.PEN -> drawPressureModulated(canvas, stroke)
-            Tool.PENCIL -> drawConstantWidth(canvas, stroke, stroke.widthBase)
-            Tool.MARKER -> {
-                paint.alpha = MARKER_ALPHA
-                drawConstantWidth(canvas, stroke, stroke.widthBase * MARKER_WIDTH_MULTIPLIER)
+    /**
+     * Inks [points] as [tool] at [widthBase]/[grayLevel] would draw them — the shared path behind
+     * both the committed stroke ([draw]) and the touch backend's live preview, so the two agree
+     * pixel for pixel. [pendingEnd] means the pen is still down: there is no far point yet to taper
+     * into, so [inkOutline] withholds the trailing half of PEN's taper.
+     */
+    internal fun drawInk(
+        canvas: Canvas,
+        points: List<StrokePoint>,
+        tool: Tool,
+        widthBase: Float,
+        grayLevel: Int,
+        pendingEnd: Boolean = false,
+    ) {
+        if (points.isEmpty()) return
+        val nib = NibProfile.forTool(tool, widthBase)
+        val color = grayLevelToColor(grayLevel)
+        val alpha = if (tool == Tool.MARKER) MARKER_ALPHA else 255
+        // Color.rgb is always opaque, so .alpha must be set after .color on every path below, not before.
+
+        if (points.size == 1) {
+            drawDot(canvas, points[0], nib, color, alpha)
+            return
+        }
+
+        when (tool) {
+            Tool.PEN -> {
+                val ring = inkOutline(points, nib, pendingEnd)
+                // All of [points] sit at the same position — a stationary pen tap — so inkOutline
+                // has no path to taper a body around; ink the dot it would have inked as one point.
+                if (ring.isEmpty()) {
+                    drawDot(canvas, points[0], nib, color, alpha)
+                    return
+                }
+                path.reset()
+                path.fillType = Path.FillType.WINDING
+                path.moveTo(ring[0], ring[1])
+                for (i in 2 until ring.size step 2) path.lineTo(ring[i], ring[i + 1])
+                path.close()
+                fillPaint.color = color
+                fillPaint.alpha = alpha
+                canvas.drawPath(path, fillPaint)
+            }
+            Tool.PENCIL, Tool.MARKER -> {
+                val segments = inkCurve(points)
+                // Same degenerate tap as inkOutline above; inkCurve has no positions to fit a curve
+                // through.
+                if (segments.isEmpty()) {
+                    drawDot(canvas, points[0], nib, color, alpha)
+                    return
+                }
+                path.reset()
+                path.moveTo(segments[0].startX, segments[0].startY)
+                for (segment in segments) {
+                    path.cubicTo(segment.c1x, segment.c1y, segment.c2x, segment.c2y, segment.endX, segment.endY)
+                }
+                strokePaint.color = color
+                strokePaint.alpha = alpha
+                strokePaint.strokeWidth = nib.maxWidth
+                canvas.drawPath(path, strokePaint)
             }
         }
     }
 
-    /**
-     * Draws the stroke a segment at a time, each segment's width set from the average pressure of
-     * its two endpoints, so the nib swells and tapers along the path. Round caps make the abutting
-     * segments read as one continuous, opaque line.
-     */
-    private fun drawPressureModulated(canvas: Canvas, stroke: Stroke) {
-        val points = stroke.points
-        if (points.size == 1) {
-            paint.strokeWidth = nibWidth(stroke.widthBase, normalizedPressure(points[0].pressure))
-            canvas.drawPoint(points[0].x, points[0].y, paint)
-            return
-        }
-        for (i in 0 until points.size - 1) {
-            val a = points[i]
-            val b = points[i + 1]
-            val averagePressure = (normalizedPressure(a.pressure) + normalizedPressure(b.pressure)) / 2f
-            paint.strokeWidth = nibWidth(stroke.widthBase, averagePressure)
-            canvas.drawLine(a.x, a.y, b.x, b.y, paint)
-        }
+    /** Inks the round dot a one-point (or degenerate, same-position) stroke draws. */
+    private fun drawDot(canvas: Canvas, point: StrokePoint, nib: NibProfile, color: Int, alpha: Int) {
+        fillPaint.color = color
+        fillPaint.alpha = alpha
+        canvas.drawCircle(point.x, point.y, dotRadius(point, nib), fillPaint)
     }
 
-    /** Draws the whole stroke as one polyline at a fixed [width]; pressure does not vary the nib. */
-    private fun drawConstantWidth(canvas: Canvas, stroke: Stroke, width: Float) {
-        paint.strokeWidth = width
-        val points = stroke.points
-        if (points.size == 1) {
-            canvas.drawPoint(points[0].x, points[0].y, paint)
-            return
-        }
-        path.reset()
-        path.moveTo(points[0].x, points[0].y)
-        for (i in 1 until points.size) path.lineTo(points[i].x, points[i].y)
-        canvas.drawPath(path, paint)
-    }
-
-    private fun nibWidth(widthBase: Float, pressure: Float): Float =
-        widthBase * (MIN_WIDTH_FACTOR + PRESSURE_WIDTH_FACTOR * pressure)
-
     /**
-     * By the PenBackend contract a stroke's points arrive with pressure already normalized to
-     * 0..1; this clamp is defensive, so a backend that breaks that contract cannot inflate the nib
-     * width beyond [widthBase].
+     * The gray→color mapping, private to [drawInk]. The width law it used to hold alongside this
+     * (pressure response, marker weight) now lives in :core's [NibProfile], shared by :app and
+     * :pen-onyx alike; only this mapping remains duplicated, in :pen-onyx's own copy, since that
+     * module cannot depend on :app.
      */
-    private fun normalizedPressure(pressure: Float): Float = pressure.coerceIn(0f, 1f)
-
-    /**
-     * The single source of truth for how a stroke's tool and darkness become ink appearance. The
-     * touch backend's live preview reads [MARKER_WIDTH_MULTIPLIER], [MARKER_ALPHA] and
-     * [grayLevelToColor] from here so its wet ink matches the committed stroke this renderer draws;
-     * the members it does not need stay private. (:pen-onyx keeps its own copy of the mapping — it
-     * cannot depend on :app — which is the one boundary-justified duplication.)
-     */
-    internal companion object {
-        /** Nib width at zero pressure, as a fraction of the stroke's base width. */
-        private const val MIN_WIDTH_FACTOR = 0.35f
-
-        /** Extra nib width added at full pressure, as a fraction of the stroke's base width. */
-        private const val PRESSURE_WIDTH_FACTOR = 0.65f
-
-        /** The marker lays down a broad nib: this multiple of the stroke's base width. */
-        const val MARKER_WIDTH_MULTIPLIER = 2.5f
-
+    companion object {
         /** The marker is translucent so overlaps read as highlighter ink, not solid fill. */
-        const val MARKER_ALPHA = 128
+        private const val MARKER_ALPHA = 128
 
         /**
          * grayLevel is ink *darkness* per the model ([Stroke.grayLevel]: 0 = white, 255 = black),
          * so it maps to an opaque gray whose channel value is its complement.
          */
-        fun grayLevelToColor(grayLevel: Int): Int {
+        private fun grayLevelToColor(grayLevel: Int): Int {
             val channel = 255 - grayLevel.coerceIn(0, 255)
             return Color.rgb(channel, channel, channel)
         }

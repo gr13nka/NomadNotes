@@ -8,6 +8,7 @@ import android.util.Log
 import android.view.SurfaceView
 import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
+import com.nomadnotes.core.ink.NibProfile
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.data.note.TouchPoint
@@ -62,6 +63,10 @@ class OnyxRawDrawingController(
     private var strokeWidthPx: Float = DEFAULT_STROKE_WIDTH
     private var strokeColor: Int = Color.BLACK
 
+    // The tool behind strokeStyle/strokeWidthPx, kept separately because toStrokePoints needs to
+    // decide (not just configure) by it: only PEN gets measured nib factors (see [nibFactorsFor]).
+    private var currentTool: Tool = Tool.PENCIL
+
     // State mirrors: TouchHelper exposes no getters we trust, so we track these here to bracket
     // [renderToScreen] correctly and to restore state across a region reopen. `wetInkEnabled` is
     // whether the panel paints wet ink; it is off while a gesture is a selection (erase/lasso).
@@ -102,7 +107,7 @@ class OnyxRawDrawingController(
             Log.i(TAG, "onRawDrawingTouchPointListReceived: ${points.size} points (wetInk=$wetInkEnabled)")
             // Every drawing-channel gesture goes up verbatim; the caller knows from its capture mode
             // whether it is a stroke, an erase, or a lasso (wet ink is off for the latter two).
-            onDrawingGesture(points.toStrokePoints())
+            onDrawingGesture(points.toStrokePoints(withNibFactors = currentTool == Tool.PEN))
         }
 
         override fun onBeginRawErasing(shortcut: Boolean, point: TouchPoint?) {
@@ -177,13 +182,19 @@ class OnyxRawDrawingController(
 
     /**
      * Sets how the wet stroke looks so it matches the ink the caller will later render: [tool] picks
-     * the stroke style (and a wider nib for the marker), [widthBase] is the nib width in surface
-     * pixels, and [grayLevel] (0 = white, 255 = black) picks a gray so the wet tone ≈ the committed
-     * tone. Takes effect on the next stroke; may be called before or after [openRawDrawing].
+     * the stroke style, [widthBase] is fed through :core's [NibProfile] for the same nib width the
+     * renderer and touch preview use (wider for the marker), and [grayLevel] (0 = white, 255 =
+     * black) picks a gray so the wet tone ≈ the committed tone. Takes effect on the next stroke; may
+     * be called before or after [openRawDrawing].
+     *
+     * If a device pass finds the hardware fountain nib reading heavier than our own PEN ink, scale
+     * [NibProfile.maxWidth] here by a hardware-only constant rather than adjusting the shared
+     * profile — the mismatch is this panel's rendering, not the width law.
      */
     fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int) {
+        currentTool = tool
         strokeStyle = tool.toStrokeStyle()
-        strokeWidthPx = tool.strokeWidth(widthBase)
+        strokeWidthPx = NibProfile.forTool(tool, widthBase).maxWidth
         strokeColor = grayLevelToColor(grayLevel)
         if (rawDrawingOpen) {
             touchHelper.setStrokeStyle(strokeStyle)
@@ -285,30 +296,48 @@ class OnyxRawDrawingController(
         }
     }
 
-    private fun List<TouchPoint>.toStrokePoints(): List<StrokePoint> {
+    /**
+     * [withNibFactors] asks [FountainInkSizer] for this PEN stroke's measured nib widths and
+     * attaches each as a [StrokePoint.nibFactor]; false for every other gesture (erase, and PENCIL/
+     * MARKER strokes, whose nib does not vary — see [NibProfile.forTool]'s `minWidthFactor`).
+     * [FountainInkSizer] needs the *raw* device pressure this list already carries, so sizing runs
+     * before pressure is normalized into the 0..1 [StrokePoint] contract below.
+     */
+    private fun List<TouchPoint>.toStrokePoints(withNibFactors: Boolean = false): List<StrokePoint> {
         if (isEmpty()) return emptyList()
+        val nibFactors = if (withNibFactors) nibFactorsFor(this) else null
         val startTimestamp = first().timestamp
-        return map { p ->
+        return mapIndexed { i, p ->
             StrokePoint(
                 x = p.x,
                 y = p.y,
                 pressure = (p.pressure / maxPressure).coerceIn(0f, 1f),
                 timestampDelta = p.timestamp - startTimestamp,
+                nibFactor = nibFactors?.get(i),
             )
         }
     }
 
+    /**
+     * [FountainInkSizer]'s widths for [points], as fractions of [strokeWidthPx] — the same
+     * denominator [NibProfile.maxWidth] resolves to for PEN, so `nib.maxWidth * factor` at render
+     * time recovers the width the engine actually reported. Null per point where the sizer
+     * couldn't produce a sane value; the renderer's fallback law only ever triggers per *stroke*
+     * (any missing factor demotes the whole stroke — see `inkOutline`), which is deliberate: a
+     * stroke half sized by measurement and half by guesswork would show a visible seam.
+     */
+    private fun nibFactorsFor(points: List<TouchPoint>): List<Float?>? {
+        val sizes = FountainInkSizer.sizesFor(points, strokeWidthPx, maxPressure) ?: return null
+        return sizes.map { size ->
+            (size / strokeWidthPx).takeIf { it.isFinite() }?.coerceIn(MIN_NIB_FACTOR, MAX_NIB_FACTOR)
+        }
+    }
+
     private fun Tool.toStrokeStyle(): Int = when (this) {
-        // Fountain varies width with pressure/speed, like the editor's pressure-modulated pen.
+        // Fountain varies width with pressure/speed, like the editor's tapered PEN outline.
         Tool.PEN -> TouchHelper.STROKE_STYLE_FOUNTAIN
         Tool.PENCIL -> TouchHelper.STROKE_STYLE_PENCIL
         Tool.MARKER -> TouchHelper.STROKE_STYLE_MARKER
-    }
-
-    private fun Tool.strokeWidth(widthBase: Float): Float = when (this) {
-        Tool.PEN, Tool.PENCIL -> widthBase
-        // Mirrors StrokeRenderer's broad marker nib so the wet stroke ≈ the committed one.
-        Tool.MARKER -> widthBase * MARKER_WIDTH_MULTIPLIER
     }
 
     // Mirrors StrokeRenderer.grayLevelToColor: darkness 0..255 maps to a gray whose channel value is
@@ -321,10 +350,16 @@ class OnyxRawDrawingController(
     companion object {
         private const val TAG = "OnyxRawDrawing"
         private const val DEFAULT_STROKE_WIDTH = 3.0f
-        private const val MARKER_WIDTH_MULTIPLIER = 2.5f
 
         /** Fallback pressure range when the device reports a nonpositive maximum (see [maxPressure]). */
         private const val DEFAULT_MAX_PRESSURE = 4096f
+
+        // Sane bounds on a StrokePoint.nibFactor built from FountainInkSizer's output (see
+        // [nibFactorsFor]): wide enough that a genuinely thin or heavy nib moment survives, narrow
+        // enough that a unit mismatch or a native-side glitch can't render as an invisible or
+        // page-spanning stroke.
+        private const val MIN_NIB_FACTOR = 0.05f
+        private const val MAX_NIB_FACTOR = 3f
 
         /**
          * Waveform for a repaint that removes ink (see [renderToScreen]'s `clean`). GC is a full

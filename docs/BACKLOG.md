@@ -41,13 +41,25 @@ future work — none block Phase 2, which is validated on device.
 
 ## Images and smoothing
 
-8. **Tune the smoothing levels on device.** `SmoothingLevel.LIGHT`/`STRONG` map to RDP tolerances
-   (1.2 px / 3.0 px) and a 2.5 px resample spacing, picked by eye rather than from real firmware
-   point streams. Adjust against actual handwriting; relates to item 1, since the same digitizer
+8. **Tune the smoothing and ink-curve constants on device.** `SmoothingLevel.LIGHT`/`STRONG` map to
+   `Tuning(sigmaPx, epsilonPx, maxKnotSpanPx)` — (4px, 1.5px, 48px) / (10px, 3px, 48px) — plus
+   `NibProfile.forTool`'s drive constants and the PEN's round-capped taper (`END_WIDTH_FACTOR` 0.6),
+   all picked by eye rather than from real firmware point streams. The first device pass rejected
+   needle-pointed ends and found the old sample-count denoise too weak to feel. Adjust against actual handwriting; relates to item 1, since the same digitizer
    noise is what makes region-wide taps misclassify.
-9. **Confirm the settle blit never lands mid-stroke.** `SMOOTHING_SETTLE_MS` is 300 ms and a
-   pen-down cancels it (`PenBackend.Listener.onGestureStarted`). If a fast writer ever sees a
-   dropped or truncated stroke with smoothing on, that window is the first suspect.
+9. **Confirm the ink settle never lands mid-stroke.** `INK_SETTLE_MS` is 200 ms and a pen-down
+   cancels it (`PenBackend.Listener.onGestureStarted`). The settle now always runs (it swaps the
+   hardware's raw wet ink for our own tapered/curved ink, not a smoothing correction, so it fires
+   even with smoothing OFF); if a fast writer ever sees a dropped or truncated stroke, that window
+   is the first suspect. If the device pass shows the hardware fountain nib reading heavier than
+   our PEN ink, see `OnyxRawDrawingController.setStrokeAppearance`'s note on scaling it.
+   PEN's dry width no longer comes from that scaling note alone: `FountainInkSizer` (:pen-onyx)
+   now replays a finished PEN stroke through Onyx's own `NeoFountainPen` (default `NeoPenConfig`,
+   only `width`/`maxTouchPressure` set to match the hardware nib) and stores the widths it reports
+   as each point's `StrokePoint.nibFactor`, so `inkOutline` repaints with the engine's own measured
+   widths instead of our pressure/speed law. This is unvalidated against real wet ink — a device
+   pass should compare the two and, if they still disagree, tune `NeoPenConfig`'s left-at-default
+   knobs (dpi, smoothLevel, pressure/velocity sensitivity) rather than the width law.
 10. **Orphaned image assets are never collected.** Deleting a page (or undoing an image insert past
     the undo cap) leaves its file in `<notebook>.nnote/images/`. Deleting the whole notebook still
     cleans up, since the directory goes with it. A sweep comparing files against the refs on every
