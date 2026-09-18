@@ -16,7 +16,22 @@ import kotlin.math.sqrt
  * thresholds each level implies are an implementation detail of [smoothStroke], so they can be
  * retuned against real firmware without changing anything a caller stores or displays.
  */
-enum class SmoothingLevel { OFF, LIGHT, STRONG }
+enum class SmoothingLevel {
+    OFF,
+
+    /**
+     * Derives its tuning from the stroke itself (see [autoTuning]) rather than a fixed pixel
+     * budget, so one setting suits both a delicate printed letter and a page-wide cursive stroke.
+     *
+     * AUTO describes a *finished* stroke: its tuning depends on the whole stroke's bounding box,
+     * which changes as more points arrive. Smoothing a prefix of a stroke with AUTO therefore
+     * does not produce a prefix of the final result — a caller that smooths incrementally (a live
+     * preview, say) cannot assume otherwise.
+     */
+    AUTO,
+    LIGHT,
+    STRONG,
+}
 
 /**
  * Returns [points] with digitizer jitter removed — the "auto-smoothing" applied to a stroke as
@@ -29,14 +44,17 @@ enum class SmoothingLevel { OFF, LIGHT, STRONG }
  * regardless of how densely the digitizer happened to sample. [simplify] (Ramer–Douglas–Peucker)
  * then drops the points the smoothed path no longer needs to keep its shape. [splitLongSpans]
  * puts a few back wherever that left two knots far enough apart to cut a visible corner across
- * real curvature — a slack RDP tolerance would otherwise straighten.
+ * real curvature — a slack RDP tolerance would otherwise straighten. [SmoothingLevel.AUTO] picks
+ * the sigma and epsilon behind those first two stages from the stroke itself rather than a fixed
+ * budget; see [autoTuning].
  *
- * The result is a *sparse* list of knots, each one still a captured sample with its own pressure
- * and timestamp — smoothing only ever nudges a position, by about the level's epsilon at most.
- * It is not a path to draw directly: it is the knot list of a centripetal Catmull–Rom curve, and
- * a caller renders it through [inkCurve] or [inkOutline]. Knots stay within about epsilon of the
- * captured path, and the rendered curve within about 1.5x epsilon of the knot polyline in turn —
- * comfortably inside the tolerance eraser and lasso hit-testing already allow on that polyline.
+ * The result is a *sparse* list of knots, each one still a captured sample with its own pressure,
+ * timestamp and nib factor — smoothing only ever nudges a position, by about the level's epsilon
+ * at most. It is not a path to draw directly: it is the knot list of a centripetal Catmull–Rom
+ * curve, and a caller renders it through [inkCurve] or [inkOutline]. Knots stay within about
+ * epsilon of the captured path, and the rendered curve within about 1.5x epsilon of the knot
+ * polyline in turn — comfortably inside the tolerance eraser and lasso hit-testing already allow
+ * on that polyline.
  *
  * Contract relied on by callers:
  *  - [SmoothingLevel.OFF] returns [points] itself, unchanged.
@@ -45,17 +63,43 @@ enum class SmoothingLevel { OFF, LIGHT, STRONG }
  *  - The first and last points are always preserved exactly, including their pressure and
  *    `timestampDelta`. The stroke therefore keeps its total duration, which
  *    `TapClassifier` reads from the last point.
+ *  - Every surviving knot is one of the captured samples verbatim — smoothing only moves a
+ *    position, never invents a point — so a knot's pressure, timestamp and `nibFactor` always
+ *    match some sample the pen actually produced.
+ *  - [SmoothingLevel.AUTO] describes a *finished* stroke: smoothing a prefix of one with AUTO
+ *    does not produce a prefix of the final result — a caller that smooths incrementally (a live
+ *    preview, say) cannot assume otherwise.
  *
  * [points] is expected in capture order, with non-decreasing `timestampDelta` (what every backend
  * produces); the ordering of the output is only as good as the input's.
  */
 fun smoothStroke(points: List<StrokePoint>, level: SmoothingLevel): List<StrokePoint> {
-    val tuning = tuningFor(level) ?: return points
+    if (level == SmoothingLevel.OFF) return points
     if (points.size < MIN_SMOOTHABLE_POINTS) return points
     // Repeated positions are common when the pen rests, and would put zero-length segments into
     // both the corner test and the spline's parameterization, which divides by their length.
     val distinct = withoutRepeatedPositions(points)
     if (distinct.size < MIN_SMOOTHABLE_POINTS) return points
+    return smoothDistinct(points, distinct, tuningFor(level, distinct))
+}
+
+/**
+ * [smoothStroke] with the tuning supplied rather than derived — `SmoothingCalibrationReport`
+ * sweeps candidate constants through the very code the app runs.
+ */
+internal fun smoothStrokeTuned(points: List<StrokePoint>, sigmaPx: Float, epsilonPx: Float, maxKnotSpanPx: Float): List<StrokePoint> {
+    if (points.size < MIN_SMOOTHABLE_POINTS) return points
+    val distinct = withoutRepeatedPositions(points)
+    if (distinct.size < MIN_SMOOTHABLE_POINTS) return points
+    return smoothDistinct(points, distinct, Tuning(sigmaPx, epsilonPx, maxKnotSpanPx))
+}
+
+/**
+ * The smooth-simplify-splice pipeline shared by [smoothStroke] and [smoothStrokeTuned], once a
+ * [Tuning] has been chosen and [points] de-duplicated into [distinct]. This is the only place
+ * either entry point turns a tuning into pixels, so they cannot drift apart.
+ */
+private fun smoothDistinct(points: List<StrokePoint>, distinct: List<StrokePoint>, tuning: Tuning): List<StrokePoint> {
     val smoothed = smoothPath(distinct, tuning.sigmaPx)
     val knots = splitLongSpans(simplify(smoothed, tuning.epsilonPx), smoothed, tuning.maxKnotSpanPx)
     val result = knots.toMutableList()
@@ -307,11 +351,93 @@ private class Tuning(
 // never smooths across. epsilonPx is smaller than it used to be at both levels: the path entering
 // [simplify] is already smooth, so RDP's job here is only thinning knots, not doing any of the
 // actual smoothing. Reach for a stronger effect by raising sigmaPx, not epsilonPx or maxKnotSpanPx.
-private fun tuningFor(level: SmoothingLevel): Tuning? = when (level) {
-    SmoothingLevel.OFF -> null
-    SmoothingLevel.LIGHT -> Tuning(sigmaPx = 4f, epsilonPx = 1.5f, maxKnotSpanPx = 48f)
-    SmoothingLevel.STRONG -> Tuning(sigmaPx = 10f, epsilonPx = 3f, maxKnotSpanPx = 48f)
+private const val LIGHT_SIGMA_PX = 4f
+private const val LIGHT_EPSILON_PX = 1.5f
+
+// STRONG's sigma and epsilon double as [autoTuning]'s ceiling, so a stronger effect for AUTO's
+// largest strokes always means raising these, never a separate AUTO-only constant.
+private const val STRONG_SIGMA_PX = 10f
+private const val STRONG_EPSILON_PX = 3f
+
+internal const val MAX_KNOT_SPAN_PX = 48f
+
+private fun tuningFor(level: SmoothingLevel, stroke: List<StrokePoint>): Tuning = when (level) {
+    SmoothingLevel.AUTO -> autoTuning(stroke)
+    SmoothingLevel.LIGHT -> Tuning(sigmaPx = LIGHT_SIGMA_PX, epsilonPx = LIGHT_EPSILON_PX, maxKnotSpanPx = MAX_KNOT_SPAN_PX)
+    SmoothingLevel.STRONG -> Tuning(sigmaPx = STRONG_SIGMA_PX, epsilonPx = STRONG_EPSILON_PX, maxKnotSpanPx = MAX_KNOT_SPAN_PX)
+    SmoothingLevel.OFF -> error("OFF is answered before a tuning is chosen")
 }
+
+/**
+ * The tuning for [SmoothingLevel.AUTO], derived from [stroke] rather than fixed, so one setting
+ * suits both a delicate printed letter and a page-wide cursive stroke. Both terms are capped by
+ * [shapeScalePx] — see [autoSigmaPx] and [autoEpsilonPx] for the rationale behind each.
+ */
+private fun autoTuning(stroke: List<StrokePoint>): Tuning = Tuning(
+    sigmaPx = autoSigmaPx(stroke, SIGMA_FRACTION_OF_SHAPE),
+    epsilonPx = autoEpsilonPx(stroke, MAX_EPSILON_FRACTION_OF_SHAPE_AUTO),
+    maxKnotSpanPx = MAX_KNOT_SPAN_PX,
+)
+
+/**
+ * [autoTuning]'s Gaussian scale, with [sigmaFractionOfShape] supplied rather than fixed to
+ * [SIGMA_FRACTION_OF_SHAPE] — `SmoothingCalibrationReport`'s entry point for sweeping that
+ * candidate through the real formula instead of a reimplementation of it that could drift out of
+ * sync.
+ *
+ * Capped at [STRONG_SIGMA_PX]: a stroke large enough gets the same full Animate-like cleanup as
+ * [SmoothingLevel.STRONG], never more. Below that cap, Gaussian smoothing at scale sigma shrinks a
+ * curve of radius r by about sigma^2/(2r); taking r as half of [shapeScalePx], that loss is
+ * sigma^2/shape, so [SIGMA_FRACTION_OF_SHAPE] = 0.2 keeps it near 4% of the letter's smaller side —
+ * small enough that a small letter keeps its counters, while a large stroke rides the cap up to
+ * STRONG's own cleanup.
+ */
+internal fun autoSigmaPx(stroke: List<StrokePoint>, sigmaFractionOfShape: Float): Float =
+    min(STRONG_SIGMA_PX, sigmaFractionOfShape * max(shapeScalePx(stroke), MIN_SHAPE_SCALE_PX))
+
+/**
+ * [autoTuning]'s simplification tolerance, with [epsilonFractionOfShape] supplied rather than
+ * fixed to [MAX_EPSILON_FRACTION_OF_SHAPE_AUTO] — `SmoothingCalibrationReport`'s entry point for
+ * sweeping that candidate through the real formula instead of a reimplementation of it that could
+ * drift out of sync.
+ *
+ * By the time [simplify] runs, [smoothPath] has already done the actual smoothing, so this only
+ * thins knots — bounded below by [TREMOR_PX] (measured digitizer tremor, below which there is
+ * nothing left worth keeping a knot for) and above by [STRONG_EPSILON_PX] (AUTO should never thin
+ * more aggressively than the named strongest level).
+ */
+internal fun autoEpsilonPx(stroke: List<StrokePoint>, epsilonFractionOfShape: Float): Float =
+    (epsilonFractionOfShape * max(shapeScalePx(stroke), MIN_SHAPE_SCALE_PX)).coerceIn(TREMOR_PX, STRONG_EPSILON_PX)
+
+/**
+ * The size of the smallest feature [stroke] can contain, in page pixels: the shorter side of its
+ * bounding box, not the diagonal. A diagonal overstates it — in cursive, one stroke is often a whole
+ * word, where the diagonal reports several hundred pixels while the features that matter (the
+ * x-height loops and notches) are a tenth of that.
+ */
+internal fun shapeScalePx(stroke: List<StrokePoint>): Float {
+    var minX = Float.MAX_VALUE
+    var maxX = -Float.MAX_VALUE
+    var minY = Float.MAX_VALUE
+    var maxY = -Float.MAX_VALUE
+    for (point in stroke) {
+        if (point.x < minX) minX = point.x
+        if (point.x > maxX) maxX = point.x
+        if (point.y < minY) minY = point.y
+        if (point.y > maxY) maxY = point.y
+    }
+    return min(maxX - minX, maxY - minY)
+}
+
+// Measured from 115 real strokes pulled off the author's Boox Go 10.3 (test.nnote) — see
+// SmoothingCalibrationReport, which recomputes these percentiles from any corpus. Both are in page
+// pixels, so they are specific to this panel's pixel density; re-run the report rather than eyeball
+// new numbers for other hardware.
+private const val TREMOR_PX = 0.45f // p95 of measured digitizer tremor (p50 0.10, p99 1.0 px)
+private const val MIN_SHAPE_SCALE_PX = 8.0f // p10 of measured stroke extent
+
+private const val SIGMA_FRACTION_OF_SHAPE = 0.2f
+private const val MAX_EPSILON_FRACTION_OF_SHAPE_AUTO = 0.03f
 
 /** Shortest distance from [point] to the segment [start]-[end], or to the shared point if degenerate. */
 private fun distanceToSegment(point: StrokePoint, start: StrokePoint, end: StrokePoint): Float {

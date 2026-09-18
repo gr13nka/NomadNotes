@@ -59,10 +59,18 @@
     <string name="shade_dark">Dark</string>
     <string name="shade_light">Light</string>
 
-    <!-- Editor: stroke smoothing, one control cycling through the levels -->
+    <!-- Editor: stroke smoothing, a two-state toggle between off and auto -->
     <string name="smoothing_off">Smooth: Off</string>
+    <string name="smoothing_auto">Smooth: Auto</string>
     <string name="smoothing_light">Smooth: Light</string>
     <string name="smoothing_strong">Smooth: Strong</string>
+
+    <!-- Editor: multi-finger gestures -->
+    <string name="gesture_undone">Undone</string>
+    <string name="gesture_nothing_to_undo">Nothing to undo</string>
+    <string name="gesture_redone">Redone</string>
+    <string name="gesture_nothing_to_redo">Nothing to redo</string>
+    <string name="gesture_lasso">Lasso</string>
 
     <!-- Editor: history and panels -->
     <string name="action_undo">Undo</string>

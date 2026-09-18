@@ -51,3 +51,6 @@ before raw drawing captures any ink. Full steps are in `README.md` → *Device s
 
 - Specs: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`.
 - Future work and device-pass findings: `docs/BACKLOG.md`.
+- Landing page: `site/` — static HTML/CSS/JS, no build step, outside Gradle. The hero plays device
+  recordings from `site/assets/` (file names and recording spec in `site/assets/README.md`); keep it
+  black and white, one typeface, minimal copy.

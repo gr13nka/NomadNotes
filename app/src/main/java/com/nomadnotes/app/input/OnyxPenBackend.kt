@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.SurfaceView
 import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
@@ -28,6 +29,15 @@ import com.nomadnotes.pen.onyx.OnyxRawDrawingController
  * :pen-onyx directly. The controller delivers finished raw gestures on Onyx's own input thread, so
  * this adapter marshals those to the main thread; the lasso touch path already runs on the main
  * thread, matching the [PenBackend.Listener] UI-thread contract.
+ *
+ * A single [SurfaceView] touch listener also feeds [FingerGestures], which recognizes a two-finger
+ * tap (undo), a three-finger tap (redo), and a hold (which arms the next pen stroke as a lasso)
+ * alongside whichever pen path is active — pen and resting fingers share one
+ * [android.view.MotionEvent] stream, so neither may steal it from the other. Every pen-down/up,
+ * from either capture path, is funneled through
+ * [onPenGestureStarted]/[onPenGestureFinished], which also latch [captureMode] for the gesture in
+ * flight (see that property's doc) so a finger arming the lasso mid-stroke can never drop
+ * or reclassify the stroke already under the pen.
  *
  * @param currentComposite supplies the committed page bitmap, blitted to clean the surface before
  *   raw drawing is enabled — Onyx requires an already-drawn surface (see [OnyxRawDrawingController]).
@@ -58,35 +68,90 @@ class OnyxPenBackend(
     private var rawResumed = false
     private var lassoTouchActive = false
 
+    // Freezes which mode the in-flight pen gesture is captured/reported under, from pen-down to
+    // pen-up (see [onPenGestureStarted]/[onPenGestureFinished] and [captureMode]'s doc). This is the
+    // guarantee the editor gets in its own words: it sets a mode and the backend promises no stroke
+    // is dropped or reclassified — a finger going down mid-stroke to arm the lasso is
+    // ignored until that stroke ends, and a finger lifting mid-stroke still lets the lasso finish,
+    // because intent is expressed by the pen's path, not by how long the fingers happened to stay down.
+    private var penGestureInProgress = false
+    private var capturedMode = CaptureMode.INK
+
+    // Recognizes the two-finger tap (undo), three-finger tap (redo), and hold (arms the next stroke as
+    // a lasso) from the shared touch listener installed in [attach], independent of which pen path is
+    // currently active.
+    private val fingerGestures = FingerGestures(
+        handler = mainHandler,
+        onUndoGesture = { listener?.onUndoGesture() },
+        onRedoGesture = { listener?.onRedoGesture() },
+        onLassoArmed = { listener?.onLassoArmed() },
+    )
+
     // Captures the lasso gesture as ordinary touch while raw drawing is off (see [reconcile]). Stylus
     // only, so a palm resting on the panel does not start a lasso. Touch events are on the main
     // thread, so the listener is called directly — no marshalling.
     private val lassoCollector = GestureCollector(
         stylusOnly = true,
-        onStarted = { listener?.onGestureStarted() },
+        onStarted = { onPenGestureStarted() },
         onSample = { points -> listener?.onLassoMove(points.last()) },
-        onFinished = { points -> listener?.onLassoGesture(points) },
-        onCancelled = { listener?.onLassoGesture(emptyList()) },
+        onFinished = { points ->
+            listener?.onLassoGesture(points)
+            onPenGestureFinished()
+        },
+        onCancelled = {
+            listener?.onLassoGesture(emptyList())
+            onPenGestureFinished()
+        },
     )
 
     override var captureMode: CaptureMode = CaptureMode.INK
         set(value) {
             if (field == value) return
             field = value
-            reconcile()
+            // Deferred while a gesture is in flight: reconcile() would switch raw drawing (or the
+            // lasso listener) out from under the pen. onPenGestureFinished applies the change once
+            // the gesture ends instead — see captureMode's doc for the guarantee this buys.
+            Log.d(GTAG, "captureMode=$value penGestureInProgress=$penGestureInProgress")
+            if (!penGestureInProgress) reconcile()
         }
 
+    @SuppressLint("ClickableViewAccessibility")
     override fun attach(surfaceView: SurfaceView, listener: PenBackend.Listener) {
         this.surfaceView = surfaceView
         this.listener = listener
         val controller = OnyxRawDrawingController(
             surfaceView = surfaceView,
             // Onyx delivers these on its input thread; the listener contract is UI-thread, so post.
-            // The drawing channel is routed by captureMode on the main thread (after the post), so it
-            // reads the mode the editor last set; the erase channel is the hardware side button.
-            onDrawingGesture = { points -> mainHandler.post { routeDrawingGesture(points) } },
-            onEraseGesture = { points -> mainHandler.post { this.listener?.onEraseGesture(points) } },
-            onGestureStarted = { mainHandler.post { this.listener?.onGestureStarted() } },
+            // The drawing channel is routed by capturedMode (frozen at this gesture's pen-down), not
+            // the live captureMode; the erase channel is the hardware side button.
+            //
+            // Each Runnable below drops itself when raw drawing is paused (!rawResumed) by the time
+            // it actually runs. captureMode changes are deferred while a pen gesture is in progress
+            // (see captureMode's setter and onPenGestureFinished), so a genuine raw gesture always
+            // both starts and finishes with raw drawing resumed — the only raw callback that can run
+            // here with raw drawing paused belongs to a pen-down that landed in the instant raw
+            // drawing was being paused for a lasso, and the touch path has already captured that
+            // pen-down as the lasso. Routing it too would corrupt it.
+            onDrawingGesture = { points ->
+                mainHandler.post {
+                    if (!rawResumed) return@post
+                    routeDrawingGesture(points)
+                    onPenGestureFinished()
+                }
+            },
+            onEraseGesture = { points ->
+                mainHandler.post {
+                    if (!rawResumed) return@post
+                    this.listener?.onEraseGesture(points)
+                    onPenGestureFinished()
+                }
+            },
+            onGestureStarted = {
+                mainHandler.post {
+                    if (!rawResumed) return@post
+                    onPenGestureStarted()
+                }
+            },
         )
         this.controller = controller
         controller.setStrokeAppearance(tool, widthBase, grayLevel)
@@ -94,24 +159,77 @@ class OnyxPenBackend(
         // (raw drawing or the lasso touch listener) up per the current mode.
         controller.renderToScreen(currentComposite())
         controller.openRawDrawing(Rect(0, 0, surfaceView.width, surfaceView.height), excludeRects)
+        surfaceView.setOnTouchListener { _, event ->
+            if (!enabled) return@setOnTouchListener false
+            // Both see every event: during a two-finger-hold lasso the pen and the resting fingers
+            // share one MotionEvent stream, so neither path may short-circuit the other out of it.
+            val finger = fingerGestures.onTouch(event)
+            val lasso = lassoTouchActive && lassoCollector.onTouch(event)
+            Log.d(
+                GTAG,
+                "touch action=${event.actionMasked} ptrs=${event.pointerCount} " +
+                    "tool0=${event.getToolType(0)} dev=${event.deviceId} " +
+                    "lassoActive=$lassoTouchActive finger=$finger lasso=$lasso",
+            )
+            finger || lasso
+        }
         reconcile()
     }
 
-    /** Routes a finished raw-drawing gesture by the current [captureMode]. Runs on the main thread. */
+    /**
+     * The pen touched down, from whichever capture path saw it first (raw drawing's
+     * `onGestureStarted`, or the lasso [lassoCollector]'s `onStarted`) — the one place that knows a
+     * pen gesture began, so [captureMode] can be latched into [capturedMode] and [fingerGestures]
+     * told the pen is no longer free for a hold.
+     */
+    private fun onPenGestureStarted() {
+        Log.d(GTAG, "penGestureStarted mode=$captureMode")
+        penGestureInProgress = true
+        capturedMode = captureMode
+        fingerGestures.onPenDown()
+        listener?.onGestureStarted()
+    }
+
+    /**
+     * The pen lifted or its gesture was abandoned, from whichever capture path finished it (raw
+     * drawing's `onDrawingGesture`/`onEraseGesture`, or the lasso [lassoCollector]'s
+     * `onFinished`/`onCancelled`) — the one place that knows a pen gesture ended. Un-latches
+     * [captureMode] and, if the editor changed it while the gesture was in flight, applies that
+     * change now instead of mid-stroke.
+     */
+    private fun onPenGestureFinished() {
+        penGestureInProgress = false
+        fingerGestures.onPenUp()
+        // Un-latch before reconciling, not after: reconcile() can cancel an in-flight lasso, which
+        // re-enters this method, and a capturedMode still holding the old value would make that
+        // second pass reconcile all over again.
+        val deferred = captureMode != capturedMode
+        capturedMode = captureMode
+        if (deferred) reconcile()
+    }
+
+    /** Routes a finished raw-drawing gesture by [capturedMode]. Runs on the main thread. */
     private fun routeDrawingGesture(points: List<StrokePoint>) {
         val listener = listener ?: return
-        when (captureMode) {
+        when (capturedMode) {
             CaptureMode.INK -> listener.onStrokeFinished(points)
             CaptureMode.ERASE -> listener.onEraseGesture(points)
-            // A lasso is captured as touch, not on the raw channel (raw drawing is off in LASSO), so
-            // this is not normally reached; route it anyway in case a gesture straddles a mode change.
-            CaptureMode.LASSO -> listener.onLassoGesture(points)
+            // Unreachable in practice: a lasso is captured as touch with raw drawing off, and the
+            // raw callbacks wired in attach() already drop anything delivered while raw drawing is
+            // paused. A gesture captured under LASSO here could therefore only be a straddle
+            // artefact from that pause — and the touch path has already captured that pen-down as
+            // the lasso, so routing it too would corrupt it. Drop it.
+            CaptureMode.LASSO -> Unit
         }
     }
 
     override fun setEnabled(enabled: Boolean) {
         if (this.enabled == enabled) return
         this.enabled = enabled
+        if (!enabled) {
+            fingerGestures.reset()
+            penGestureInProgress = false
+        }
         reconcile()
     }
 
@@ -142,10 +260,13 @@ class OnyxPenBackend(
     @SuppressLint("ClickableViewAccessibility")
     override fun detach() {
         setLassoTouchActive(false)
+        surfaceView?.setOnTouchListener(null)
         controller?.close()
         controller = null
         surfaceView = null
         listener = null
+        fingerGestures.reset()
+        penGestureInProgress = false
         // Drop any gesture callbacks still queued for the main thread, so a late post cannot reach a
         // now-detached listener after teardown.
         mainHandler.removeCallbacksAndMessages(null)
@@ -174,20 +295,23 @@ class OnyxPenBackend(
             controller.pause()
             rawResumed = false
         }
+        Log.d(GTAG, "reconcile useRaw=$useRaw enabled=$enabled mode=$captureMode")
         setLassoTouchActive(enabled && captureMode == CaptureMode.LASSO)
     }
 
-    @SuppressLint("ClickableViewAccessibility")
+    /**
+     * Arms or disarms the lasso collector's share of the touch listener installed once in [attach]
+     * for the whole attachment — [fingerGestures] must see every event regardless of mode, so this
+     * never installs or removes the listener itself, only flips whether [lassoCollector] also gets
+     * a look at it.
+     */
     private fun setLassoTouchActive(active: Boolean) {
         if (active == lassoTouchActive) return
         lassoTouchActive = active
-        val surfaceView = surfaceView ?: return
         if (active) {
             lassoCollector.setExcludeRects(excludeRects)
-            surfaceView.setOnTouchListener { _, event -> lassoCollector.onTouch(event) }
         } else {
-            surfaceView.setOnTouchListener(null)
-            // Tearing the listener down mid-gesture drops a lasso the touch stream will never finish;
+            // Turning lasso capture off mid-gesture drops a lasso the touch stream will never finish;
             // report it as an empty (cancelled) gesture so the editor restores the page and clears its
             // live-preview state, rather than leaking a stale drag into the next gesture.
             lassoCollector.reset(notifyCancel = true)
@@ -197,6 +321,9 @@ class OnyxPenBackend(
     companion object {
         /** grayLevel default (black) until the editor pushes the real ink darkness. */
         private const val MAX_GRAY_LEVEL = 255
+
+        /** TEMPORARY: two-finger gesture diagnosis, 2026-09-17. Remove with the logging it tags. */
+        private const val GTAG = "GestureDebug"
 
         /** True only on Onyx Boox hardware, where raw drawing is real. */
         fun isSupported(): Boolean = OnyxRawDrawingController.isBooxDevice()

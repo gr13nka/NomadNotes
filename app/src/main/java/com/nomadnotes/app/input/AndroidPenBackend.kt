@@ -210,7 +210,10 @@ class AndroidPenBackend(
         if (inkSmoothing == SmoothingLevel.OFF) return points
         val settled = points.size - RAW_TAIL_POINTS
         if (settled < MIN_SMOOTHABLE_POINTS) return points
-        return smoothStroke(points.subList(0, settled), inkSmoothing) +
+        // Preview at a fixed strength rather than the real inkSmoothing setting — see [PREVIEW_SMOOTHING].
+        // Only this touch fallback needs it: OnyxPenBackend.setInkSmoothing is a no-op, since the
+        // firmware paints its own wet ink.
+        return smoothStroke(points.subList(0, settled), PREVIEW_SMOOTHING) +
             points.subList(settled, points.size)
     }
 
@@ -230,5 +233,10 @@ class AndroidPenBackend(
 
         /** How many of the newest samples stay raw in a live preview, having no points after them yet. */
         const val RAW_TAIL_POINTS = 2
+
+        /** A half-drawn stroke is not yet the stroke AUTO would describe - its extent and speed are still
+         *  arriving, so an auto tuning would shift under the settled ink every frame. Preview at a fixed
+         *  light strength instead; the commit repaint replaces it with the real thing. */
+        val PREVIEW_SMOOTHING = SmoothingLevel.LIGHT
     }
 }

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Debug-only additions, merged into the manifest for debug builds alone: being in src/debug means
+    FingerProbeActivity physically cannot reach a release APK.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+
+        <!--
+            Deliberately no LAUNCHER category. A second launcher activity in this package makes the
+            Boox launcher show the probe *instead of* NomadNotes itself, which is far worse than
+            needing adb to start it. The operator is tethered at the start of a probe session anyway
+            to pull the CSV, and every label button is on-screen once it is running, so nothing about
+            the two-handed run actually needs an icon:
+
+                adb shell am start -n com.nomadnotes/.app.probe.FingerProbeActivity
+        -->
+        <activity
+            android:name=".app.probe.FingerProbeActivity"
+            android:label="Finger Probe"
+            android:exported="true" />
+
+    </application>
+
+</manifest>
