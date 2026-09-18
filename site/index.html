@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NomadNotes</title>
+<meta name="description" content="A handwriting app for Onyx Boox.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23000'/%3E%3Ctext x='32' y='45' font-family='Arial, sans-serif' font-size='38' font-weight='700' fill='%23fff' text-anchor='middle'%3EN%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="site-header">
+  <span class="brand">NomadNotes</span>
+  <a href="https://github.com/gr13nka/NomadNotes">GitHub</a>
+</header>
+
+<main>
+  <section class="hero">
+    <h1>Just the page.</h1>
+    <p class="hero-sub">A handwriting app for Onyx Boox.</p>
+    <a class="cta" href="https://github.com/gr13nka/NomadNotes/releases">Download for Boox &rarr;</a>
+
+    <div class="demo">
+      <video class="demo-video" muted playsinline preload="metadata"></video>
+      <div class="demo-empty" hidden></div>
+    </div>
+
+    <nav class="chapters">
+      <button type="button" class="chapter active"
+              data-src="assets/smooth.mp4" data-poster="assets/smooth.jpg"
+              data-caption="Every stroke cleaned up. Small letters kept.">
+        <span class="label">Smooth</span>
+        <span class="track"><span class="fill"></span></span>
+      </button>
+      <button type="button" class="chapter"
+              data-src="assets/undo.mp4" data-poster="assets/undo.jpg"
+              data-caption="Two fingers to undo. Three to redo.">
+        <span class="label">Undo</span>
+        <span class="track"><span class="fill"></span></span>
+      </button>
+      <button type="button" class="chapter"
+              data-src="assets/select.mp4" data-poster="assets/select.jpg"
+              data-caption="Hold two fingers, then circle with the pen.">
+        <span class="label">Select</span>
+        <span class="track"><span class="fill"></span></span>
+      </button>
+      <button type="button" class="chapter"
+              data-src="assets/link.mp4" data-poster="assets/link.jpg"
+              data-caption="Circle words, link a page, tap to jump.">
+        <span class="label">Link</span>
+        <span class="track"><span class="fill"></span></span>
+      </button>
+    </nav>
+    <p class="caption"></p>
+  </section>
+
+  <section class="idea">
+    <p>On e-ink, every trip to a toolbar costs a refresh. So the things you do most moved onto the page, under your fingers.</p>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <p>Made for Boox Go 10.3. Open source on <a href="https://github.com/gr13nka/NomadNotes">GitHub</a>.</p>
+</footer>
+
+<script defer src="demo.js"></script>
+</body>
+</html>
