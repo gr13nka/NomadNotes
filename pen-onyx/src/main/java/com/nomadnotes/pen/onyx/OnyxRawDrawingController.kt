@@ -111,6 +111,11 @@ class OnyxRawDrawingController(
 
         override fun onBeginRawErasing(shortcut: Boolean, point: TouchPoint?) {
             Log.i(TAG, "onBeginRawErasing")
+            // The same pen-down edge as onBeginRawDrawing, on the side-button erase channel. Reported
+            // for the same reasons: a deferred repaint must not blit through an erase either, and the
+            // caller's finger-gesture recognizer needs to know the pen is down so a palm landing
+            // mid-erase cannot be read as a deliberate two-finger gesture.
+            onGestureStarted()
         }
 
         override fun onEndRawErasing(shortcut: Boolean, point: TouchPoint?) {
