@@ -65,6 +65,13 @@
     <string name="smoothing_light">Smooth: Light</string>
     <string name="smoothing_strong">Smooth: Strong</string>
 
+    <!-- Editor: multi-finger gestures -->
+    <string name="gesture_undone">Undone</string>
+    <string name="gesture_nothing_to_undo">Nothing to undo</string>
+    <string name="gesture_redone">Redone</string>
+    <string name="gesture_nothing_to_redo">Nothing to redo</string>
+    <string name="gesture_lasso">Lasso</string>
+
     <!-- Editor: history and panels -->
     <string name="action_undo">Undo</string>
     <string name="action_redo">Redo</string>

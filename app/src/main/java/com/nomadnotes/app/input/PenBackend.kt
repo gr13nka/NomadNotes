@@ -48,6 +48,12 @@ interface PenBackend {
      * How the next finished gesture is captured and reported (see [CaptureMode]). In [CaptureMode.INK]
      * the backend shows wet ink and reports a stroke; in [CaptureMode.ERASE]/[CaptureMode.LASSO] it
      * shows none and reports the gesture for erasing or lasso selection.
+     *
+     * Setting this while a gesture is already in progress does not retarget that gesture: a backend
+     * latches the mode at pen-down, so a stroke finishes in whichever mode it started under even if
+     * the editor changes this again before the pen lifts. The new value takes hold at the next
+     * pen-down instead — the editor sets a mode and can trust that no in-flight stroke is dropped
+     * or reclassified out from under it.
      */
     var captureMode: CaptureMode
 
@@ -141,5 +147,32 @@ interface PenBackend {
          * carries the whole path.
          */
         fun onLassoMove(point: StrokePoint)
+
+        /**
+         * A two-finger tap: undo the last edit. Pointer counts, pressures and contact sizes never
+         * cross this interface — undo arrives as intent, not gesture mechanics, so the single-pointer
+         * [StrokePoint] vocabulary above this seam stays untouched by whatever produced it. A backend
+         * where the finger is itself the drawing tool (the plain-touch backend) has no finger to spare
+         * for this gesture and simply never calls it.
+         */
+        fun onUndoGesture()
+
+        /**
+         * A three-finger tap: redo the last undone edit. Same register as [onUndoGesture] — intent,
+         * not pointer mechanics — and a backend where the finger is itself the drawing tool (the
+         * plain-touch backend) simply never calls it either.
+         */
+        fun onRedoGesture()
+
+        /**
+         * Fingers were held on the panel long enough to arm lasso capture for the pen stroke that
+         * comes next. Reported only as this one edge: the firmware gives no reliable signal that the
+         * fingers have left (pausing raw drawing to switch into LASSO cancels the finger touch stream
+         * that the hold was made of — see [com.nomadnotes.app.editor.MultiFingerGestures]'s KDoc), so
+         * how long the arm lasts is the editor's decision to make, not something this backend can
+         * report. As with [onUndoGesture] this is intent, not pointer mechanics, and a backend where
+         * touch itself draws (the plain-touch backend) never calls it.
+         */
+        fun onLassoArmed()
     }
 }

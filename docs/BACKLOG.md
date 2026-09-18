@@ -43,6 +43,44 @@ future work — none block Phase 2, which is validated on device.
    - *Caveat.* Roughly half the finger events reach `dispatchTouchEvent` but not the SurfaceView
      (143 vs 73), and 5 finger streams ended in `CANCEL`. If the gesture recognizer proves lossy
      reading from the backend's listener, feed it from an Activity-level dispatch hook instead.
+
+   **Built 2026-09-17/18 (outcome A).** Two-finger tap undoes, three-finger tap redoes, and holding
+   two fingers arms the *next* pen stroke as a lasso. `MultiFingerGestures` (pure, unit-tested) holds
+   the timing and palm-rejection policy against the measured thresholds — stagger ≤120 ms,
+   separation 80-500 px, travel ≤20 px, pressure ≤0.47 normalized, and a 150 ms pen-quiet window
+   before a candidate may begin. `FingerGestures` is the MotionEvent adapter; `OnyxPenBackend` now
+   installs one touch listener for the whole attachment, feeding it and the lasso collector together.
+   Undo and the lasso arm are confirmed on device; redo-on-landing, the 150 ms arm and the straddle
+   fix below were installed 2026-09-18 and still await a device pass.
+
+   Findings from the device passes (2026-09-17 and -18) that the design did not predict:
+
+   - **The lasso cannot be a held modifier on this firmware.** Arming it pauses raw drawing, and that
+     pause makes the firmware cancel the very finger stream the hold is made of (a synthesized
+     `ACTION_CANCEL`, `deviceId=0`, `toolType=0`), after which no further events arrive for those
+     contacts — there is no lift left to observe. This is the cause of the "5 finger streams ended in
+     CANCEL" caveat above: we cause it ourselves. The hold therefore arms a **one-shot latch** covering
+     exactly the next pen gesture, expiring after 5 s if no stroke comes.
+   - **Three fingers get the same cancel, with no mode change involved.** On 13 of 13 attempts a
+     synthesized `ACTION_CANCEL` arrived in the same millisecond the third pointer landed —
+     something below the app (most likely the firmware's own three-finger handling; unconfirmed)
+     claims the stream. The lift is unobservable, so redo fires when the third finger *lands*, under
+     the same palm-safety rules (within 120 ms of the candidate starting, pressure-gated).
+   - **`HOLD_ARM_MS` is 150 ms.** The author's real two-finger taps, measured 2026-09-18 from the
+     second finger landing to the first lift, ran 70, 74 and 87 ms; the probe's 138-289 ms figure was
+     measured differently (whole contact, kernel layer) and set the earlier, slower values. Raise it if
+     taps start arming the lasso; it is one constant.
+   - **Drawing straight after arming raced the mode switch.** A pen landing while raw drawing was
+     being paused produced a stray raw-channel gesture that was routed as the lasso, spending the
+     one-shot arm and inking the rest of the stroke. Raw-channel callbacks processed while raw drawing
+     is paused are now dropped; the touch path owns that pen-down.
+
+   `enableFingerTouch` is still never called — the probe showed it is not needed — so
+   `OnyxRawDrawingController.setFingerTouchEnabled` remains available but unused.
+   Finger delivery from the SurfaceView listener proved reliable in the editor, so the lossiness
+   caveat above did not bite. **Still unmeasured:** whether a writing-posture palm stays under
+   `MAX_FINGER_PRESSURE`; only a whole open palm was measured, and it is the one input that could
+   misfire an undo or redo.
 5. **Copy/paste preserves links.** Copying a selection that forms a link region
    should carry the link; paste creates a new link (new id, same target) over the
    pasted strokes.
@@ -103,6 +141,12 @@ future work — none block Phase 2, which is validated on device.
     1.0 — no speed dependence at all. It is kept only so the prose corpus (item 8) can re-decide; if
     that run selects 1.0 again, delete it and `medianSampleSpacingPx` rather than keep machinery that
     does nothing.
+
+14. **Retire the finger probe.** `app/src/debug/` (`FingerProbeActivity`), `OnyxTouchProbeKnobs`,
+    `OnyxRawDrawingController.touchHelperForProbe()` and `tools/finger-probe-getevent.sh` existed only
+    to answer item 4, which is now answered and built against. Keep them until a device pass confirms
+    the two-finger gestures behave, then delete all four together — `OnyxTouchProbeKnobs`' own KDoc
+    says it must never outlive the experiment.
 
 ## Things-style chrome — implementation
 
