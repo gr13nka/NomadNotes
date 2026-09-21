@@ -58,5 +58,6 @@ before raw drawing captures any ink. Full steps are in `README.md` → *Device s
 ### Internal docs
 
 - `docs/internals/onyx-sdk.md` — licensing and distribution terms of the vendored Onyx SDK artifacts.
+- `docs/internals/geist-font.md` — provenance of the vendored Geist TTFs (`app/src/main/res/font/`) and where their OFL license text lives.
 - Project framing for Alps: `docs/project_pitch.md`, `docs/problem_analysis.md`, `docs/project_brief.md`;
   interview log, filter report and market dossier in `docs/research/`.

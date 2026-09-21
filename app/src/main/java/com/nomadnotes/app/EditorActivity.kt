@@ -25,12 +25,8 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -42,12 +38,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect as ComposeRect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.nomadnotes.R
@@ -65,20 +59,32 @@ import com.nomadnotes.app.render.ImageResolver
 import com.nomadnotes.app.render.PageRenderer
 import com.nomadnotes.app.render.SelectionRenderer
 import com.nomadnotes.app.render.StrokeRenderer
-import com.nomadnotes.app.render.TemplateRef
 import com.nomadnotes.app.render.TemplateResolver
 import com.nomadnotes.app.storage.EditorPrefs
 import com.nomadnotes.app.storage.NotebookStorage
 import com.nomadnotes.app.storage.notebooksRoot
 import com.nomadnotes.app.ui.ConfirmDialog
-import com.nomadnotes.app.ui.EinkBlack
-import com.nomadnotes.app.ui.EinkButton
-import com.nomadnotes.app.ui.EinkCheckbox
-import com.nomadnotes.app.ui.EinkGray
-import com.nomadnotes.app.ui.EinkRadioDot
+import com.nomadnotes.app.ui.EinkBracket
+import com.nomadnotes.app.ui.EinkSpacing
 import com.nomadnotes.app.ui.EinkTheme
-import com.nomadnotes.app.ui.EinkToggle
+import com.nomadnotes.app.ui.EinkTypography
 import com.nomadnotes.app.ui.EinkWhite
+import com.nomadnotes.app.ui.editor.BarMode
+import com.nomadnotes.app.ui.editor.EditorBar
+import com.nomadnotes.app.ui.editor.EditorBarActions
+import com.nomadnotes.app.ui.editor.EditorBarState
+import com.nomadnotes.app.ui.editor.EditorPanel
+import com.nomadnotes.app.ui.editor.EditorTool
+import com.nomadnotes.app.ui.editor.MorePanel
+import com.nomadnotes.app.ui.editor.MorePanelActions
+import com.nomadnotes.app.ui.editor.MorePanelState
+import com.nomadnotes.app.ui.editor.PagePanel
+import com.nomadnotes.app.ui.editor.PagePanelActions
+import com.nomadnotes.app.ui.editor.PagePanelState
+import com.nomadnotes.app.ui.editor.ToolPanel
+import com.nomadnotes.app.ui.editor.ToolPanelActions
+import com.nomadnotes.app.ui.editor.ToolPanelState
+import com.nomadnotes.app.ui.editor.asCoreTool
 import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.LinkId
@@ -99,6 +105,7 @@ import com.nomadnotes.core.geometry.lassoCoversRegion
 import com.nomadnotes.core.geometry.lassoSelect
 import com.nomadnotes.core.ink.SmoothingLevel
 import com.nomadnotes.core.ink.smoothStroke
+import com.nomadnotes.core.pageWindow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -108,14 +115,26 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** Nib-width presets the toolbar offers, in page pixels before the renderer applies pressure. */
-private enum class StrokeWidth(val px: Float) { S(2f), M(4f), L(8f) }
+/**
+ * Nib-width presets the toolbar offers, in page pixels before the renderer applies pressure.
+ * Internal, not private: [com.nomadnotes.app.ui.editor.ToolPanelState] names the current preset
+ * directly rather than re-deriving a value/label pair the Activity already owns.
+ */
+internal enum class StrokeWidth(val px: Float) { S(2f), M(4f), L(8f) }
 
-/** Ink-darkness presets ([Stroke.grayLevel]: 255 = black); the marker keeps its own translucency. */
-private enum class InkShade(val level: Int) { BLACK(255), DARK(170), LIGHT(85) }
+/**
+ * Ink-darkness presets ([Stroke.grayLevel]: 255 = black); the marker keeps its own translucency.
+ * Internal for the same reason as [StrokeWidth]: [com.nomadnotes.app.ui.editor.ToolPanelState]
+ * names the current preset directly.
+ */
+internal enum class InkShade(val level: Int) { BLACK(255), DARK(170), LIGHT(85) }
 
-/** A layer as the layers panel shows it: identity, label, visibility, and whether it is undeletable. */
-private data class LayerRow(val id: LayerId, val name: String, val visible: Boolean, val isMain: Boolean)
+/**
+ * A layer as the layers panel shows it: identity, label, visibility, and whether it is undeletable.
+ * Internal, not private: [com.nomadnotes.app.ui.editor.MorePanelState] carries these rows straight
+ * through to the panel rather than re-shaping them into a parallel type.
+ */
+internal data class LayerRow(val id: LayerId, val name: String, val visible: Boolean, val isMain: Boolean)
 
 /**
  * What the target picker does once a page is chosen.
@@ -144,9 +163,11 @@ private data class LinkPickerState(
  * A position a link jump departed from, so the step-back can return to it. Held by notebook *name*
  * (not id) and page id: the jump stack is in-memory only and dies with the process, so within one
  * session the directory name is a stable enough handle and lets the return load the notebook back
- * by name.
+ * by name. [pageIndex] is that page's 0-based index within its notebook at the moment of the jump,
+ * kept alongside [pageId] purely to render the jump-back line's label ("research #3") without a
+ * lookup; navigation itself still resolves the target by [pageId].
  */
-private data class JumpOrigin(val notebookName: String, val pageId: PageId)
+private data class JumpOrigin(val notebookName: String, val pageId: PageId, val pageIndex: Int)
 
 /** Dims the screen behind an open panel and captures taps to dismiss it; no fade, instant. */
 private val ScrimColor = Color(0x33000000)
@@ -166,7 +187,16 @@ private val ScrimColor = Color(0x33000000)
  * created on first use. As in the harness, a storage fault degrades to an unsaved in-memory page
  * rather than bricking the editor.
  */
-class EditorActivity : ComponentActivity() {
+// Internal, not public: it implements the internal *Actions interfaces (ToolPanelActions.onSelectTool
+// takes the internal EditorTool), and a public class cannot expose an internal type in a public
+// member's signature. Referenced only within :app (NotebookListActivity's startActivity, by name from
+// AndroidManifest.xml), so internal loses nothing.
+internal class EditorActivity :
+    ComponentActivity(),
+    EditorBarActions,
+    ToolPanelActions,
+    PagePanelActions,
+    MorePanelActions {
 
     private lateinit var surfaceView: SurfaceView
     private lateinit var storage: NotebookStorage
@@ -197,9 +227,12 @@ class EditorActivity : ComponentActivity() {
     // everywhere else. The editor talks only to the interface and never learns which it holds.
     private lateinit var backend: PenBackend
 
-    // Last toolbar exclude rect pushed to the backend, in surface-local pixels; deduped so a stable
-    // re-layout does not churn the backend's capture region.
-    private var toolbarExcludeRect: Rect? = null
+    // Raw-drawing exclude rects pushed to the backend, in surface-local pixels, keyed by chrome
+    // element ("bar", "panel") so the bar and whichever panel is open can each update or remove their
+    // own rect independently; the union is what actually goes to PenBackend.setExcludeRects, which
+    // already accepts a list. Replaces the old single toolbarExcludeRect now that more than one
+    // chrome element can be on screen at once.
+    private val chromeRects = mutableMapOf<String, Rect>()
 
     // Loaded off the main thread once, then read only on the main thread. `notebook` is null when
     // storage is unavailable — the editor still runs on an in-memory page, it just cannot persist.
@@ -284,17 +317,25 @@ class EditorActivity : ComponentActivity() {
     private var uiCanRedo by mutableStateOf(false)
     private var uiPageIndex by mutableStateOf(0)
     private var uiPageCount by mutableStateOf(1)
-    private var uiLayersOpen by mutableStateOf(false)
-    private var uiTemplateOpen by mutableStateOf(false)
+    // Which chrome panel (if any) is open, and the window-pixel bounds of the glyph that opened it,
+    // so the panel can anchor under it (PanelAnchor.kt). Replaces the old uiLayersOpen/uiTemplateOpen:
+    // Layers and Template are sub-pages of the More panel now (MorePanel.kt's own local state), not
+    // panels of their own.
+    private var uiOpenPanel by mutableStateOf(EditorPanel.NONE)
+    private var uiOpenPanelAnchor by mutableStateOf(ComposeRect.Zero)
     private var uiLayers by mutableStateOf<List<LayerRow>>(emptyList())
     private var uiActiveLayer by mutableStateOf<LayerId?>(null)
     private var uiTemplateRef by mutableStateOf<String?>(null)
     private var uiTemplateFiles by mutableStateOf<List<String>>(emptyList())
-    private var uiDeletePageDialog by mutableStateOf(false)
     private var uiHasSelection by mutableStateOf(false)
+    // The selected stroke count, for the bar's "N strokes caught" (0 while uiHasSelection is false).
+    private var uiSelectionStrokeCount by mutableStateOf(0)
     private var uiSelectionOnMainLayer by mutableStateOf(false)
     private var uiClipboardHasContent by mutableStateOf(false)
     private var uiLinkPicker by mutableStateOf<LinkPickerState?>(null)
+
+    // Whether the bar is hidden down to a single "[≡]" ("Just the page"), persisted like [uiSmoothing].
+    private var uiChromeHidden by mutableStateOf(false)
 
     // The link the last lasso circled (its region centre enclosed), or null. Drives the "Edit link"/
     // "Delete link" actions in the selection bar; independent of any stroke selection the same circle
@@ -338,6 +379,7 @@ class EditorActivity : ComponentActivity() {
         templateResolver = TemplateResolver(storage.templatesDir)
         prefs = EditorPrefs(this)
         uiSmoothing = prefs.smoothing
+        uiChromeHidden = prefs.chromeHidden
         surfaceView = SurfaceView(this)
         backend = createBackend()
         surfaceView.holder.addCallback(surfaceCallback)
@@ -936,6 +978,7 @@ class EditorActivity : ComponentActivity() {
     private fun updateSelectionUi() {
         val selection = selection
         uiHasSelection = selection != null
+        uiSelectionStrokeCount = selection?.strokeIds?.size ?: 0
         // A link binds to the main layer's handwriting (spec), so the "Link" action is offered only
         // for a main-layer selection.
         uiSelectionOnMainLayer = selection != null && selection.layerId == session?.page?.mainLayerId
@@ -1150,8 +1193,8 @@ class EditorActivity : ComponentActivity() {
 
     /**
      * Shows the picker in [mode] and loads the notebooks it offers off the main thread. Suppresses
-     * pen capture while it is open (via [updateBackendEnabled]), like the layers/template panels, so
-     * a tap meant for the picker never draws.
+     * pen capture while it is open (via [updateBackendEnabled]), like an open chrome panel, so a tap
+     * meant for the picker never draws.
      */
     private fun openLinkPicker(mode: LinkPickerMode) {
         uiLinkPicker = LinkPickerState(mode = mode)
@@ -1479,27 +1522,141 @@ class EditorActivity : ComponentActivity() {
 
     // --- panels ----------------------------------------------------------------------------
 
-    private fun toggleLayersPanel() {
-        uiLayersOpen = !uiLayersOpen
-        if (uiLayersOpen) {
-            uiTemplateOpen = false
-            refreshLayers()
+    /**
+     * Opens [panel] anchored at [anchor], or closes it if it is already open — the "tap the same
+     * glyph again" half of [EditorBarActions]'s `onToggleXPanel` contract. Opening a different panel
+     * than the one already open replaces it, since [uiOpenPanel] holds at most one. Always wrapped in
+     * [withChromeRefresh]: harmless to call repeatedly while a panel stays open (pen capture is
+     * already off), and it is what gets the resulting Compose frame to the e-ink panel promptly.
+     */
+    private fun togglePanel(panel: EditorPanel, anchor: ComposeRect) = withChromeRefresh {
+        if (uiOpenPanel == panel) {
+            closePanel()
+        } else {
+            uiOpenPanel = panel
+            uiOpenPanelAnchor = anchor
+            // No Activity callback fires for drilling into More's Template sub-page (MorePanel.kt's
+            // own local state), so the file list is refreshed here, on every More open, instead.
+            if (panel == EditorPanel.MORE) loadTemplateFiles()
         }
-        updateBackendEnabled()
     }
 
-    private fun toggleTemplatePanel() {
-        uiTemplateOpen = !uiTemplateOpen
-        if (uiTemplateOpen) {
-            uiLayersOpen = false
-            loadTemplateFiles()
-        }
-        updateBackendEnabled()
+    /** Closes whichever panel is open. Only mutates state; callers wrap it in [withChromeRefresh]. */
+    private fun closePanel() {
+        uiOpenPanel = EditorPanel.NONE
+        updateChromeExclude(PANEL_RECT_KEY, null)
     }
 
-    /** Pen capture is off while a panel or the link picker is open, so a tap meant for it never draws a stroke. */
+    /** The panel-open tap-catcher's dismiss: an outside tap or a pen touch on the page, neither inked. */
+    private fun closePanelViaChrome() = withChromeRefresh { closePanel() }
+
+    /** Pen capture is off while a chrome panel or the link picker is open, so a tap meant for it never draws a stroke. */
     private fun updateBackendEnabled() {
-        backend.setEnabled(!uiLayersOpen && !uiTemplateOpen && uiLinkPicker == null)
+        backend.setEnabled(uiOpenPanel == EditorPanel.NONE && uiLinkPicker == null)
+    }
+
+    // --- chrome actions (EditorBarActions / ToolPanelActions / PagePanelActions / MorePanelActions) --
+
+    override fun onOpenLibrary() {
+        // NotebookListActivity starts this Activity with startActivity and never finishes itself, so
+        // finishing here is all that is needed to return to it.
+        finish()
+    }
+
+    override fun onShowChrome() = withChromeRefresh {
+        uiChromeHidden = false
+        prefs.chromeHidden = false
+    }
+
+    override fun onToggleToolPanel(anchor: ComposeRect) = togglePanel(EditorPanel.TOOL, anchor)
+    override fun onTogglePagePanel(anchor: ComposeRect) = togglePanel(EditorPanel.PAGE, anchor)
+    override fun onToggleMorePanel(anchor: ComposeRect) = togglePanel(EditorPanel.MORE, anchor)
+
+    /** Muted and inert for the whole of Phase 1 (`BarMode.Normal.findEnabled` is always false). */
+    override fun onToggleFind(anchor: ComposeRect) = Unit
+
+    override fun onJumpBack() = withChromeRefresh { jumpBack() }
+    override fun onPaste() = withChromeRefresh { pasteClipboard() }
+
+    override fun onDeselect() = withChromeRefresh { clearSelection() }
+    override fun onCopySelection() = withChromeRefresh { copySelection() }
+    override fun onLinkSelection() = withChromeRefresh { openLinkPickerForSelection() }
+    override fun onDeleteSelection() = withChromeRefresh { deleteSelection() }
+    override fun onEditCircledLink() = withChromeRefresh { editCircledLink() }
+    override fun onDeleteCircledLink() = withChromeRefresh { deleteCircledLink() }
+    override fun onDeleteCircledImage() = withChromeRefresh { deleteCircledImage() }
+
+    /** Picking a tool both switches it and closes the panel (the spec: you opened it to switch tools). */
+    override fun onSelectTool(tool: EditorTool) = withChromeRefresh {
+        when (tool) {
+            EditorTool.ERASER -> selectEraser()
+            EditorTool.LASSO -> selectLasso()
+            EditorTool.PEN, EditorTool.PENCIL, EditorTool.MARKER -> tool.asCoreTool()?.let(::selectTool)
+        }
+        closePanel()
+    }
+
+    // The rating rows keep the panel open, so more than one can be adjusted in a single visit.
+    override fun onDecreaseWidth() = withChromeRefresh { stepWidth(-1) }
+    override fun onIncreaseWidth() = withChromeRefresh { stepWidth(1) }
+    override fun onDecreaseShade() = withChromeRefresh { stepShade(-1) }
+    override fun onIncreaseShade() = withChromeRefresh { stepShade(1) }
+    override fun onToggleSmoothing() = withChromeRefresh { toggleSmoothing() }
+
+    private fun stepWidth(delta: Int) {
+        val entries = StrokeWidth.entries
+        setWidth(entries[(uiWidth.ordinal + delta).coerceIn(0, entries.lastIndex)])
+    }
+
+    private fun stepShade(delta: Int) {
+        val entries = InkShade.entries
+        setShade(entries[(uiShade.ordinal + delta).coerceIn(0, entries.lastIndex)])
+    }
+
+    // Prev/next keep the panel open (paging through several pages in one visit); selecting a strip
+    // thumbnail, inserting a page, or confirming a delete all close it.
+    override fun onPrevPage() = withChromeRefresh { goToPage(uiPageIndex - 1) }
+    override fun onNextPage() = withChromeRefresh { goToPage(uiPageIndex + 1) }
+
+    override fun onSelectPage(pageIndex: Int) = withChromeRefresh {
+        goToPage(pageIndex)
+        closePanel()
+    }
+
+    override fun onInsertPageAfterCurrent() = withChromeRefresh {
+        insertPageAfterCurrent()
+        closePanel()
+    }
+
+    /** Called once, after PagePanel's own inline confirm says yes — never a raw button tap. */
+    override fun onDeleteCurrentPage() = withChromeRefresh {
+        deleteCurrentPage()
+        closePanel()
+    }
+
+    override fun onInsertImage() = withChromeRefresh {
+        imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        closePanel()
+    }
+
+    // Layer toggles keep the panel open, like the Tool panel's rating rows.
+    override fun onToggleLayerVisible(id: LayerId, visible: Boolean) = withChromeRefresh { toggleLayerVisible(id, visible) }
+    override fun onSelectActiveLayer(id: LayerId) = withChromeRefresh { setActiveLayer(id) }
+    override fun onAddLayer() = withChromeRefresh { addLayer() }
+    override fun onRemoveLayer(id: LayerId) = withChromeRefresh { removeLayer(id) }
+
+    override fun onSelectTemplate(ref: String?) = withChromeRefresh {
+        setTemplate(ref)
+        closePanel()
+    }
+
+    override fun onUndo() = withChromeRefresh { undo() }
+    override fun onRedo() = withChromeRefresh { redo() }
+
+    override fun onHideToolbar() = withChromeRefresh {
+        closePanel()
+        uiChromeHidden = true
+        prefs.chromeHidden = true
     }
 
     /**
@@ -1623,22 +1780,23 @@ class EditorActivity : ComponentActivity() {
     }
 
     /**
-     * Pushes the toolbar's on-screen bounds to the backend as an exclude rect, in surface-local
-     * pixels, so a pen stroke starting on the toolbar is never captured as ink. Called on each
-     * toolbar layout; deduped so a stable layout does not reconfigure the backend's capture region.
+     * Pushes [rect] into the backend's raw-drawing exclude set under [key] (`null` removes that key),
+     * so a pen stroke starting on a chrome element is never captured as ink. Replaces the old single
+     * `updateToolbarExclude`: more than one chrome element can be on screen at once now (the bar, plus
+     * at most one open panel), each reporting its own bounds under its own key ("bar", "panel") — see
+     * [chromeRects] — and this pushes their union to [PenBackend.setExcludeRects], which already
+     * accepts a list. Deduped per key so a stable layout does not reconfigure the capture region.
      */
-    private fun updateToolbarExclude(boundsInWindow: androidx.compose.ui.geometry.Rect) {
-        val surfaceLocation = IntArray(2).also { surfaceView.getLocationInWindow(it) }
-        val rect = Rect(
-            (boundsInWindow.left - surfaceLocation[0]).toInt(),
-            (boundsInWindow.top - surfaceLocation[1]).toInt(),
-            (boundsInWindow.right - surfaceLocation[0]).toInt(),
-            (boundsInWindow.bottom - surfaceLocation[1]).toInt(),
-        )
-        if (rect == toolbarExcludeRect) return
-        toolbarExcludeRect = rect
-        Log.d(TAG, "Toolbar exclude rect: $rect")
-        backend.setExcludeRects(listOf(rect))
+    private fun updateChromeExclude(key: String, rect: Rect?) {
+        if (rect == null) {
+            if (chromeRects.remove(key) == null) return
+        } else if (chromeRects[key] == rect) {
+            return
+        } else {
+            chromeRects[key] = rect
+        }
+        Log.d(TAG, "Chrome exclude rects: $chromeRects")
+        backend.setExcludeRects(chromeRects.values.toList())
     }
 
     // --- page navigation -------------------------------------------------------------------
@@ -1810,7 +1968,7 @@ class EditorActivity : ComponentActivity() {
     private fun pushJumpOrigin() {
         val notebook = notebook ?: return
         val page = session?.page ?: return
-        jumpStack.addLast(JumpOrigin(notebook.name, page.id))
+        jumpStack.addLast(JumpOrigin(notebook.name, page.id, uiPageIndex))
         while (jumpStack.size > MAX_JUMP_STACK) jumpStack.removeFirst()
         uiJumpDepth = jumpStack.size
     }
@@ -1889,21 +2047,96 @@ class EditorActivity : ComponentActivity() {
         }
     }
 
+    // --- chrome state builders ---------------------------------------------------------------
+
+    /** The bar's own "current tool" input: the toolbar tool plus the eraser/lasso flags layered on top. */
+    private fun currentEditorTool(): EditorTool = when {
+        uiEraser -> EditorTool.ERASER
+        uiLasso -> EditorTool.LASSO
+        else -> when (uiTool) {
+            Tool.PEN -> EditorTool.PEN
+            Tool.PENCIL -> EditorTool.PENCIL
+            Tool.MARKER -> EditorTool.MARKER
+        }
+    }
+
+    /** The label of the page most recently jumped from ("research #3"), or null with nothing to step back to. */
+    private fun jumpBackLabel(): String? {
+        val origin = jumpStack.lastOrNull() ?: return null
+        return "${origin.notebookName} #${origin.pageIndex + 1}"
+    }
+
+    private fun barMode(): BarMode = when {
+        uiChromeHidden -> BarMode.Hidden
+        uiHasSelection || uiCircledLink != null || uiCircledImage != null -> BarMode.Selection(
+            strokeCount = if (uiHasSelection) uiSelectionStrokeCount else null,
+            canLink = uiHasSelection && uiSelectionOnMainLayer,
+            circledLink = uiCircledLink != null,
+            circledImage = uiCircledImage != null,
+        )
+        else -> BarMode.Normal(
+            activeTool = currentEditorTool(),
+            pageIndex = uiPageIndex,
+            pageCount = uiPageCount,
+            jumpBackLabel = jumpBackLabel(),
+            canPaste = uiClipboardHasContent,
+            findEnabled = false, // Wired in Phase 3; present but muted until then.
+        )
+    }
+
+    private fun toolPanelState(): ToolPanelState {
+        val tool = currentEditorTool()
+        val isInkTool = tool == EditorTool.PEN || tool == EditorTool.PENCIL || tool == EditorTool.MARKER
+        return ToolPanelState(
+            activeTool = tool,
+            width = if (isInkTool) uiWidth else null,
+            shade = if (isInkTool) uiShade else null,
+            smoothingOn = if (isInkTool) uiSmoothing != SmoothingLevel.OFF else null,
+        )
+    }
+
+    private fun pagePanelState(): PagePanelState = PagePanelState(
+        pageIndex = uiPageIndex,
+        pageCount = uiPageCount,
+        canGoPrev = uiPageIndex > 0,
+        canGoNext = uiPageIndex < uiPageCount - 1,
+        canDelete = uiPageCount > 1,
+        strip = pageWindow(uiPageIndex, uiPageCount),
+        thumbnailFor = null, // Phase 2 wires a real thumbnail cache in; number cells stand in until then.
+    )
+
+    private fun morePanelState(): MorePanelState = MorePanelState(
+        canUndo = uiCanUndo,
+        canRedo = uiCanRedo,
+        layers = uiLayers,
+        activeLayerId = uiActiveLayer,
+        canAddLayer = uiLayers.size < PageEditSession.MAX_LAYERS,
+        templateRef = uiTemplateRef,
+        templateFiles = uiTemplateFiles,
+    )
+
     // --- Compose UI ------------------------------------------------------------------------
 
     @Composable
     private fun EditorScreen() {
-        // Full-bleed canvas with the toolbar overlaid on top, matching the drawing spike's proven
-        // geometry: the SurfaceView fills the window, so the measured toolbar exclude rect lands as a
-        // positive on-surface region (in a Column the toolbar sat above the surface and its rect was
-        // off-surface — a no-op that let pen taps on the toolbar reach the raw-input reader). The
-        // toolbar's opaque background hides the ink beneath it. Overlays draw last, so when a panel is
-        // open its scrim also dims the toolbar strip — acceptable, and it keeps the panel fully visible
-        // rather than clipped under the toolbar.
+        // Full-bleed canvas with the bar and at most one open panel overlaid on top: the SurfaceView
+        // fills the window, so a measured chrome exclude rect lands as a positive on-surface region.
+        // While a panel is open, a full-screen transparent tap-catcher sits between the canvas and the
+        // bar, so a tap — or a pen touch, since raw drawing is off while any panel is open and the
+        // touch takes the ordinary Android path instead — that misses the panel's own controls closes
+        // it rather than reaching the canvas as ink. See [PanelTapCatcher] and [closePanelViaChrome].
         Box(Modifier.fillMaxSize()) {
             CanvasView()
-            EditorToolbar()
-            EditorOverlays()
+            if (uiOpenPanel != EditorPanel.NONE) {
+                PanelTapCatcher(onDismiss = ::closePanelViaChrome)
+            }
+            EditorBar(
+                state = EditorBarState(barMode()),
+                actions = this@EditorActivity,
+                onBoundsChanged = { updateChromeExclude(BAR_RECT_KEY, it) },
+            )
+            EditorPanelContent()
+            EditorDialogs()
         }
     }
 
@@ -1913,150 +2146,36 @@ class EditorActivity : ComponentActivity() {
         AndroidView(factory = { surfaceView }, modifier = Modifier.fillMaxSize())
     }
 
-    @OptIn(ExperimentalLayoutApi::class) // FlowRow / FlowRowScope.align are still marked experimental.
+    /**
+     * A full-screen, invisible click target shown only while a panel is open, sandwiched between the
+     * canvas and the bar (see [EditorScreen]) so the bar's own glyphs keep working (tapping the one
+     * that opened the panel closes it; tapping another switches panels) while every other tap or pen
+     * touch dismisses. No scrim — the no-scrims rule means the page stays legible behind an open
+     * panel — so this exists purely to catch and dismiss, not to dim anything.
+     */
     @Composable
-    private fun EditorToolbar() {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .background(EinkWhite)
-                .onGloballyPositioned { updateToolbarExclude(it.boundsInWindow()) },
-        ) {
-            // A wrapping FlowRow rather than a horizontally scrolling Row: every control stays on
-            // screen (spilling onto a second line when the width runs out) and there is no scroll
-            // gesture — the toolbar scroll lagged badly after a stroke, since raw drawing suppresses
-            // the fling's window repaints. The toolbar grows taller when it wraps; the exclude rect is
-            // measured from these bounds, so it grows with it, and the full-bleed canvas sits behind.
-            FlowRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                // Every chrome mutation is wrapped in withChromeRefresh: raw drawing suppresses normal
-                // window rendering on Onyx, so without the brief capture pause the toolbar repaint (tool
-                // highlight, page counter) would not reach the panel until a later full refresh. The
-                // panel toggles are the exception — they drive updateBackendEnabled themselves.
-                EinkToggle(stringResource(R.string.action_pen), selected = !uiEraser && uiTool == Tool.PEN) { withChromeRefresh { selectTool(Tool.PEN) } }
-                EinkToggle(stringResource(R.string.action_pencil), selected = !uiEraser && uiTool == Tool.PENCIL) { withChromeRefresh { selectTool(Tool.PENCIL) } }
-                EinkToggle(stringResource(R.string.action_marker), selected = !uiEraser && uiTool == Tool.MARKER) { withChromeRefresh { selectTool(Tool.MARKER) } }
-                EinkToggle(stringResource(R.string.action_eraser), selected = uiEraser) { withChromeRefresh { selectEraser() } }
-                EinkToggle(stringResource(R.string.action_lasso), selected = uiLasso) { withChromeRefresh { selectLasso() } }
-                // The selection action bar lives in the toolbar so its buttons sit in the already-excluded
-                // strip (no dynamic raw-drawing exclude rect) and appearing does not resize the canvas.
-                if (uiHasSelection || uiCircledLink != null || uiCircledImage != null || uiClipboardHasContent) {
-                    ToolbarDivider()
-                    if (uiHasSelection) {
-                        EinkButton(stringResource(R.string.action_copy)) { withChromeRefresh { copySelection() } }
-                        EinkButton(stringResource(R.string.action_delete)) { withChromeRefresh { deleteSelection() } }
-                        // A link binds to the main layer's handwriting, so this is hidden for other layers.
-                        if (uiSelectionOnMainLayer) {
-                            EinkButton(stringResource(R.string.action_link)) { withChromeRefresh { openLinkPickerForSelection() } }
-                        }
-                        EinkButton(stringResource(R.string.action_deselect)) { withChromeRefresh { clearSelection() } }
-                    }
-                    // Shown whenever a lasso circled a link, whether or not it also caught strokes.
-                    if (uiCircledLink != null) {
-                        EinkButton(stringResource(R.string.action_edit_link)) { withChromeRefresh { editCircledLink() } }
-                        EinkButton(stringResource(R.string.action_delete_link)) { withChromeRefresh { deleteCircledLink() } }
-                    }
-                    // Shown whenever a lasso circled an image. Moving and resizing it are pen gestures
-                    // on the image itself, so deleting is the only action that needs a button.
-                    if (uiCircledImage != null) {
-                        EinkButton(stringResource(R.string.action_delete_image)) { withChromeRefresh { deleteCircledImage() } }
-                    }
-                    if (uiClipboardHasContent) {
-                        EinkButton(stringResource(R.string.action_paste)) { withChromeRefresh { pasteClipboard() } }
-                    }
-                }
-                ToolbarDivider()
+    private fun PanelTapCatcher(onDismiss: () -> Unit) {
+        Box(Modifier.fillMaxSize().clickable(onClick = onDismiss))
+    }
 
-                EinkToggle(stringResource(R.string.width_small), selected = uiWidth == StrokeWidth.S) { withChromeRefresh { setWidth(StrokeWidth.S) } }
-                EinkToggle(stringResource(R.string.width_medium), selected = uiWidth == StrokeWidth.M) { withChromeRefresh { setWidth(StrokeWidth.M) } }
-                EinkToggle(stringResource(R.string.width_large), selected = uiWidth == StrokeWidth.L) { withChromeRefresh { setWidth(StrokeWidth.L) } }
-                ToolbarDivider()
-
-                EinkToggle(stringResource(R.string.shade_black), selected = uiShade == InkShade.BLACK) { withChromeRefresh { setShade(InkShade.BLACK) } }
-                EinkToggle(stringResource(R.string.shade_dark), selected = uiShade == InkShade.DARK) { withChromeRefresh { setShade(InkShade.DARK) } }
-                EinkToggle(stringResource(R.string.shade_light), selected = uiShade == InkShade.LIGHT) { withChromeRefresh { setShade(InkShade.LIGHT) } }
-                ToolbarDivider()
-
-                // A two-state toggle, not a cycling control: AUTO derives its own strength, so there is
-                // no level left for the user to search for.
-                val smoothingLabel = when (uiSmoothing) {
-                    SmoothingLevel.OFF -> R.string.smoothing_off
-                    SmoothingLevel.AUTO -> R.string.smoothing_auto
-                    SmoothingLevel.LIGHT -> R.string.smoothing_light
-                    SmoothingLevel.STRONG -> R.string.smoothing_strong
-                }
-                EinkToggle(stringResource(smoothingLabel), selected = uiSmoothing != SmoothingLevel.OFF) { withChromeRefresh { toggleSmoothing() } }
-                ToolbarDivider()
-
-                EinkButton(stringResource(R.string.action_undo), enabled = uiCanUndo) { withChromeRefresh { undo() } }
-                EinkButton(stringResource(R.string.action_redo), enabled = uiCanRedo) { withChromeRefresh { redo() } }
-                ToolbarDivider()
-
-                EinkToggle(stringResource(R.string.action_layers), selected = uiLayersOpen) { toggleLayersPanel() }
-                EinkToggle(stringResource(R.string.action_template), selected = uiTemplateOpen) { toggleTemplatePanel() }
-                EinkButton(stringResource(R.string.action_insert_image)) {
-                    withChromeRefresh {
-                        imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                    }
-                }
-                ToolbarDivider()
-
-                // The step-back through link jumps, shown only when there is somewhere to step back to.
-                if (uiJumpDepth > 0) {
-                    EinkButton(stringResource(R.string.nav_jump_back)) { withChromeRefresh { jumpBack() } }
-                }
-                EinkButton(stringResource(R.string.nav_prev), enabled = uiPageIndex > 0) { withChromeRefresh { goToPage(uiPageIndex - 1) } }
-                Text(
-                    stringResource(R.string.page_position, uiPageIndex + 1, uiPageCount),
-                    color = EinkBlack,
-                    fontSize = 15.sp,
-                    modifier = Modifier.align(Alignment.CenterVertically),
-                )
-                EinkButton(stringResource(R.string.nav_next), enabled = uiPageIndex < uiPageCount - 1) { withChromeRefresh { goToPage(uiPageIndex + 1) } }
-                EinkButton(stringResource(R.string.action_insert_page)) { withChromeRefresh { insertPageAfterCurrent() } }
-                EinkButton(stringResource(R.string.action_delete_page), enabled = uiPageCount > 1) { uiDeletePageDialog = true }
-            }
-            Box(Modifier.fillMaxWidth().height(1.dp).background(EinkBlack))
+    /** Whichever panel [uiOpenPanel] names, anchored at [uiOpenPanelAnchor]. At most one at a time. */
+    @Composable
+    private fun BoxScope.EditorPanelContent() {
+        val onBounds: (Rect) -> Unit = { updateChromeExclude(PANEL_RECT_KEY, it) }
+        when (uiOpenPanel) {
+            EditorPanel.TOOL -> ToolPanel(toolPanelState(), this@EditorActivity, uiOpenPanelAnchor, onBounds)
+            EditorPanel.PAGE -> PagePanel(pagePanelState(), this@EditorActivity, uiOpenPanelAnchor, onBounds)
+            EditorPanel.MORE -> MorePanel(morePanelState(), this@EditorActivity, uiOpenPanelAnchor, onBounds)
+            EditorPanel.FIND, EditorPanel.NONE -> Unit
         }
     }
 
+    /** The link target picker and the broken-link confirm — everything else moved into the chrome panels. */
     @Composable
-    private fun ToolbarDivider() {
-        Box(Modifier.width(1.dp).height(28.dp).background(EinkGray))
-    }
-
-    /** The panels and dialogs stacked over the canvas. Isolated here so their state reads never touch [CanvasView]. */
-    @Composable
-    private fun BoxScope.EditorOverlays() {
-        if (uiLayersOpen) {
-            Scrim { toggleLayersPanel() }
-            LayersPanel(Modifier.align(Alignment.TopEnd).fillMaxHeight())
-        }
-        if (uiTemplateOpen) {
-            Scrim { toggleTemplatePanel() }
-            TemplatePanel(Modifier.align(Alignment.TopEnd).fillMaxHeight())
-        }
+    private fun BoxScope.EditorDialogs() {
         uiLinkPicker?.let { picker ->
             Scrim { closeLinkPicker() }
             LinkPickerPanel(picker, Modifier.align(Alignment.TopEnd).fillMaxHeight())
-        }
-        if (uiDeletePageDialog) {
-            ConfirmDialog(
-                title = stringResource(R.string.delete_page_title),
-                message = stringResource(R.string.delete_page_message),
-                confirmLabel = stringResource(R.string.action_delete),
-                cancelLabel = stringResource(R.string.action_cancel),
-                onConfirm = {
-                    uiDeletePageDialog = false
-                    withChromeRefresh { deleteCurrentPage() }
-                },
-                onDismiss = { uiDeletePageDialog = false },
-            )
         }
         uiBrokenLinkDialog?.let { link ->
             ConfirmDialog(
@@ -2078,75 +2197,11 @@ class EditorActivity : ComponentActivity() {
         Box(Modifier.fillMaxSize().background(ScrimColor).clickable(onClick = onDismiss))
     }
 
-    @Composable
-    private fun LayersPanel(modifier: Modifier) {
-        Column(
-            modifier = modifier
-                .width(280.dp)
-                .background(EinkWhite)
-                .padding(12.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text(stringResource(R.string.layers_title), color = EinkBlack, fontSize = 18.sp)
-            for (row in uiLayers) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    EinkCheckbox(checked = row.visible) { toggleLayerVisible(row.id, it) }
-                    EinkRadioDot(selected = uiActiveLayer == row.id) { setActiveLayer(row.id) }
-                    Text(row.name, color = EinkBlack, fontSize = 15.sp, modifier = Modifier.weight(1f), maxLines = 1)
-                    EinkButton(stringResource(R.string.item_delete), enabled = !row.isMain) { removeLayer(row.id) }
-                }
-            }
-            EinkButton(stringResource(R.string.layers_add), enabled = uiLayers.size < PageEditSession.MAX_LAYERS) { addLayer() }
-        }
-    }
-
-    @Composable
-    private fun TemplatePanel(modifier: Modifier) {
-        val current = uiTemplateRef
-        val blankLabel = stringResource(R.string.template_blank)
-        val linesLabel = stringResource(R.string.template_lines)
-        val gridLabel = stringResource(R.string.template_grid)
-        val options = buildList {
-            add(blankLabel to TemplateRef.BLANK)
-            add(linesLabel to TemplateRef.LINES)
-            add(gridLabel to TemplateRef.GRID)
-            uiTemplateFiles.forEach { add(it to (TemplateRef.USER_PREFIX + it)) }
-        }
-        Column(
-            modifier = modifier
-                .width(320.dp)
-                .background(EinkWhite)
-                .padding(12.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(stringResource(R.string.template_title), color = EinkBlack, fontSize = 18.sp)
-            for (pair in options.chunked(2)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for ((label, ref) in pair) {
-                        val selected = if (ref == TemplateRef.BLANK) {
-                            TemplateRef.parse(current) == TemplateRef.Blank
-                        } else {
-                            current == ref
-                        }
-                        EinkToggle(label, selected = selected, modifier = Modifier.weight(1f)) { setTemplate(ref) }
-                    }
-                    if (pair.size == 1) Spacer(Modifier.weight(1f))
-                }
-            }
-        }
-    }
-
     /**
      * The two-step target picker: first the notebooks (current one first, marked as such), then a
-     * page number within the chosen notebook. Each list wraps in a [FlowRow], and the panel scrolls
-     * like the layers/template panels so a long notebook or page list stays fully reachable; the
-     * scrim behind it cancels. Choosing a page confirms the link.
+     * page number within the chosen notebook. Restyled onto the chrome tokens and bracket voice
+     * ([EinkBracket]/[EinkTypography]) in Phase 1; the two-step flow itself, and its scrim-to-cancel,
+     * are unchanged. Each list wraps in a [FlowRow] so a long notebook or page list stays reachable.
      */
     @OptIn(ExperimentalLayoutApi::class)
     @Composable
@@ -2155,19 +2210,19 @@ class EditorActivity : ComponentActivity() {
             modifier = modifier
                 .width(360.dp)
                 .background(EinkWhite)
-                .padding(16.dp)
+                .padding(EinkSpacing.S)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(EinkSpacing.S),
         ) {
-            Text(stringResource(R.string.link_picker_title), color = EinkBlack, fontSize = 18.sp)
+            Text(stringResource(R.string.link_picker_title), style = EinkTypography.Title)
             val chosen = picker.chosenNotebook
             if (chosen == null) {
                 val notebooks = picker.notebooks
                 if (notebooks != null) {
                     val currentId = notebook?.id
                     FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(EinkSpacing.XS),
+                        verticalArrangement = Arrangement.spacedBy(EinkSpacing.XS),
                     ) {
                         // Current notebook first; the rest keep listNotebooks' name order (stable sort).
                         for (nb in notebooks.sortedByDescending { it.id == currentId }) {
@@ -2176,21 +2231,21 @@ class EditorActivity : ComponentActivity() {
                             } else {
                                 nb.name
                             }
-                            EinkButton(label) { uiLinkPicker = picker.copy(chosenNotebook = nb) }
+                            EinkBracket(label) { uiLinkPicker = picker.copy(chosenNotebook = nb) }
                         }
                     }
                 }
             } else {
-                Text(chosen.name, color = EinkBlack, fontSize = 15.sp)
+                Text(chosen.name, style = EinkTypography.Body)
                 FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(EinkSpacing.XS),
+                    verticalArrangement = Arrangement.spacedBy(EinkSpacing.XS),
                 ) {
                     chosen.pageIds.forEachIndexed { index, pageId ->
-                        EinkButton((index + 1).toString()) { confirmLinkTarget(picker, chosen, pageId) }
+                        EinkBracket((index + 1).toString()) { confirmLinkTarget(picker, chosen, pageId) }
                     }
                 }
-                EinkButton(stringResource(R.string.link_picker_back)) {
+                EinkBracket(stringResource(R.string.link_picker_back)) {
                     uiLinkPicker = picker.copy(chosenNotebook = null)
                 }
             }
@@ -2279,6 +2334,10 @@ private const val MIN_IMAGE_SIZE_PX = 48f
 
         /** How many jump origins the step-back stack keeps; past this the oldest is dropped. */
         private const val MAX_JUMP_STACK = 20
+
+        /** Keys into [chromeRects]: the bar's own bounds, and the currently open panel's bounds. */
+        private const val BAR_RECT_KEY = "bar"
+        private const val PANEL_RECT_KEY = "panel"
 
         /** Image extensions offered as user templates from the `templates/` directory. */
         private val TEMPLATE_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "bmp")

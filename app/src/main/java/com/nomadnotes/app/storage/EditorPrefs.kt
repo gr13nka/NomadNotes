@@ -35,8 +35,16 @@ class EditorPrefs(context: Context) {
             prefs.edit().putString(KEY_SMOOTHING, value.name).apply()
         }
 
+    /** Whether the chrome is hidden down to a single "[≡]" ("Just the page"). Defaults to shown. */
+    var chromeHidden: Boolean
+        get() = prefs.getBoolean(KEY_CHROME_HIDDEN, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_CHROME_HIDDEN, value).apply()
+        }
+
     private companion object {
         const val FILE_NAME = "editor-prefs"
         const val KEY_SMOOTHING = "smoothing"
+        const val KEY_CHROME_HIDDEN = "chrome_hidden"
     }
 }

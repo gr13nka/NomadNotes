@@ -24,22 +24,6 @@
     <string name="action_rename">Rename</string>
     <string name="action_delete">Delete</string>
 
-    <!-- Editor: tools -->
-    <string name="action_pen">Pen</string>
-    <string name="action_pencil">Pencil</string>
-    <string name="action_marker">Marker</string>
-    <string name="action_eraser">Eraser</string>
-    <string name="action_lasso">Lasso</string>
-
-    <!-- Editor: lasso selection actions -->
-    <string name="action_copy">Copy</string>
-    <string name="action_paste">Paste</string>
-    <string name="action_deselect">Deselect</string>
-    <string name="action_link">Link</string>
-    <string name="action_edit_link">Edit link</string>
-    <string name="action_delete_link">Delete link</string>
-    <string name="action_delete_image">Delete image</string>
-
     <!-- Editor: link target picker -->
     <string name="link_picker_title">Link to page</string>
     <string name="link_picker_current">%1$s (this notebook)</string>
@@ -49,56 +33,97 @@
     <string name="broken_link_title">Broken link</string>
     <string name="broken_link_message">Target not found. Delete this link?</string>
 
-    <!-- Editor: nib width presets -->
-    <string name="width_small">S</string>
-    <string name="width_medium">M</string>
-    <string name="width_large">L</string>
-
-    <!-- Editor: ink shade presets -->
-    <string name="shade_black">Black</string>
-    <string name="shade_dark">Dark</string>
-    <string name="shade_light">Light</string>
-
-    <!-- Editor: stroke smoothing, a two-state toggle between off and auto -->
-    <string name="smoothing_off">Smooth: Off</string>
-    <string name="smoothing_auto">Smooth: Auto</string>
-    <string name="smoothing_light">Smooth: Light</string>
-    <string name="smoothing_strong">Smooth: Strong</string>
-
-    <!-- Editor: multi-finger gestures -->
-    <string name="gesture_undone">Undone</string>
-    <string name="gesture_nothing_to_undo">Nothing to undo</string>
-    <string name="gesture_redone">Redone</string>
-    <string name="gesture_nothing_to_redo">Nothing to redo</string>
-    <string name="gesture_lasso">Lasso</string>
-
-    <!-- Editor: history and panels -->
-    <string name="action_undo">Undo</string>
-    <string name="action_redo">Redo</string>
-    <string name="action_layers">Layers</string>
-    <string name="action_template">Template</string>
-    <string name="action_insert_image">Image</string>
+    <!-- Editor: multi-finger gestures (bash.org voice: dry, lowercase, no exclamation marks) -->
+    <string name="gesture_undone">undo. nobody saw that.</string>
+    <string name="gesture_nothing_to_undo">nothing to undo. clean slate.</string>
+    <string name="gesture_redone">redo. changed your mind again.</string>
+    <string name="gesture_nothing_to_redo">nothing to redo. this is the latest.</string>
+    <string name="gesture_lasso">lasso ready. draw a loop.</string>
 
     <!-- Used only by the raw-drawing SpikeActivity reference screen. -->
     <string name="action_clear">Clear</string>
 
-    <!-- Editor: page navigation -->
-    <string name="nav_jump_back">←</string>
-    <string name="nav_prev">◀</string>
-    <string name="nav_next">▶</string>
-    <string name="page_position">%1$d/%2$d</string>
-    <string name="action_insert_page">+</string>
-    <string name="action_delete_page">🗑</string>
-    <string name="delete_page_title">Delete page</string>
-    <string name="delete_page_message">Delete this page? This cannot be undone.</string>
+    <!--
+      Things-on-e-ink chrome (docs/superpowers/specs/2026-09-18-things-eink-ui-design.md and its
+      mockups): the bar and its panels. Bracket voice throughout — lowercase, dry, no punctuation
+      beyond a period in a gesture badge. EinkBracket wraps its label in "[ ]" itself, so every
+      value here is the bare word, with no brackets baked in.
+    -->
 
-    <!-- Editor: layers panel -->
-    <string name="layers_title">Layers</string>
-    <string name="layers_add">+ Add layer</string>
+    <!-- Chrome: bar glyphs -->
+    <string name="chrome_library">≡</string>
+    <string name="chrome_find">⌕</string>
+    <string name="chrome_more">⋯</string>
+    <!-- The jump-back line under the bar (mockup screen 6: "[← back to research #3]"), one bracketed phrase. -->
+    <string name="chrome_jump_back_line">← back to %1$s</string>
+    <string name="chrome_deselect">×</string>
+    <!-- "#12 of 40", replacing the old toolbar's page_position ("12/40") for the new bar/page panel. -->
+    <string name="chrome_page_position">#%1$d of %2$d</string>
 
-    <!-- Editor: template picker -->
-    <string name="template_title">Template</string>
-    <string name="template_blank">Blank</string>
-    <string name="template_lines">Lines</string>
-    <string name="template_grid">Grid</string>
+    <!-- Chrome: the five Tool-panel brackets, and the bar's own "current tool" label ("✎ pen"). -->
+    <string name="tool_pen">pen</string>
+    <string name="tool_pencil">pencil</string>
+    <string name="tool_marker">marker</string>
+    <string name="tool_eraser">eraser</string>
+    <string name="tool_lasso">lasso</string>
+    <!-- Prefixes the active tool's word to make the bar's own glyph, e.g. "✎ pen". -->
+    <string name="chrome_active_tool">✎ %1$s</string>
+
+    <!-- Chrome: selection-mode bar verbs (lowercase; distinct from the old action_* toolbar labels). -->
+    <string name="sel_strokes_caught">%1$d strokes caught</string>
+    <!-- Status text for a circled link/image with no strokes selected (strokeCount null). -->
+    <string name="sel_link_caught">link caught</string>
+    <string name="sel_image_caught">image caught</string>
+    <string name="sel_copy">copy</string>
+    <string name="sel_link">link</string>
+    <string name="sel_delete">delete</string>
+    <string name="sel_edit_link">edit link</string>
+    <string name="sel_delete_link">delete link</string>
+    <string name="sel_delete_image">delete image</string>
+    <string name="sel_paste">paste</string>
+
+    <!-- Chrome: Tool panel rating-row labels and the smoothing two-bracket toggle's words. -->
+    <string name="rate_label_width">width</string>
+    <string name="rate_label_shade">shade</string>
+    <string name="rate_label_smoothing">smoothing</string>
+    <!-- The mockup shows the width rating row as a digit ("3"), not the S/M/L the old toolbar used. -->
+    <string name="width_value_1">1</string>
+    <string name="width_value_2">2</string>
+    <string name="width_value_3">3</string>
+    <string name="shade_value_black">black</string>
+    <string name="shade_value_dark">dark</string>
+    <string name="shade_value_light">light</string>
+    <string name="smoothing_value_auto">auto</string>
+    <string name="smoothing_value_off">off</string>
+
+    <!-- Chrome: Page panel. -->
+    <string name="page_panel_prev">‹ prev</string>
+    <string name="page_panel_next">next ›</string>
+    <string name="page_panel_insert_after">+ page after this</string>
+    <string name="page_panel_delete">delete</string>
+    <string name="page_panel_delete_confirm">delete #%1$d?</string>
+    <string name="page_panel_delete_yes">yes</string>
+    <string name="page_panel_delete_keep">no, keep</string>
+
+    <!-- Chrome: More panel (root list, and the Layers/Template sub-page back row). -->
+    <string name="more_layers">layers ›</string>
+    <string name="more_template">template ›</string>
+    <string name="more_insert_image">insert image</string>
+    <string name="more_undo">undo</string>
+    <string name="more_redo">redo</string>
+    <string name="more_hide_toolbar">hide toolbar</string>
+    <string name="more_back">‹</string>
+
+    <!--
+      Chrome: More panel sub-pages (Layers/Template). Lowercase bracket-voice versions of the old
+      capitalised layers_*/template_* strings, which stay in strings.xml only where still used
+      elsewhere (item_delete: the notebook list's item menu).
+    -->
+    <string name="more_layers_title">layers</string>
+    <string name="more_layer_add">+ layer</string>
+    <string name="more_layer_delete">delete</string>
+    <string name="more_template_title">template</string>
+    <string name="template_value_blank">blank</string>
+    <string name="template_value_lines">lines</string>
+    <string name="template_value_grid">grid</string>
 </resources>
