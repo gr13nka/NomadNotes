@@ -93,6 +93,36 @@ States:
 These states replace the ad hoc 15/16/17/18/24 sp sizes and the per-call-site paddings.
 `EinkButton`, `EinkToggle` and the other controls read the tokens instead of taking literals.
 
+## Voice: bash.org manners
+
+Calm structure alone read as generic. The chrome gets its character from **copy and crisp states,
+not ornament**. Hand-drawn marks and tilted sheets were tried and rejected.
+
+- **Bracket buttons.** Every text control is lowercase text in square brackets: `[rename]`,
+  `[+ notebook]`, `[copy]`. The bar glyphs are bracketed too: `[≡] [✎ pen] [⌕] [⋯]`. Pressed
+  or active means the whole bracketed label is inverted. Names, counts and status text are
+  never bracketed.
+- **Rating control for values**, like bash.org's `[+] [−]`: `width  [−] 3 [+]`,
+  `shade  [−] dark [+]`.
+- **`#` page IDs.** Pages are numbered like quotes: `#12 of 40`, thumbnails `#1 #2 …`, and links
+  `[← back to research #3]`.
+- **Dry, lowercase, short copy.** No exclamation marks, no emoji, no cuteness. Examples:
+  - The gesture badges: `undo. nobody saw that.`, `redo. changed your mind again.`,
+    `lasso ready. draw a loop.`
+  - The empty library: `no notebooks yet. the pen is bored.`
+  - Delete confirmation: `delete thesis? all 24 pages.  [yes, burn it]  [no]`
+  - No Find results: `nothing. try fewer letters.`
+  - Lasso bar: `14 strokes caught`
+- **Current and selected states** stay geometric:
+  - The selected notebook row is inverted.
+  - The active tool's bracket label is inverted.
+  - The current page gets a 3 dp border and an inverted `#` caption.
+- **`[random page]`** (sidebar, under `recent`), after bash.org's "random": it opens a random
+  old page from any notebook, for rediscovery.
+
+Mockups: `2026-09-18-things-eink-ui-mockups.html` shows every state with this voice. Where the
+ASCII sketches below differ in wording, the mockups and this section win.
+
 ## 1. Editor chrome
 
 ### The bar

@@ -41,19 +41,6 @@
     font-size:15px;
   }
 
-  /* ---- icon sprite ---- */
-  .icon{
-    width:16px; height:16px; display:block;
-    color:var(--ink);
-    stroke:var(--ink);
-    fill:none;
-    stroke-width:1.5;
-    stroke-linecap:round;
-    stroke-linejoin:round;
-  }
-  .icon.xs{ width:11px; height:11px; }
-  .icon.sm{ width:13px; height:13px; }
-
   /* ---- frame grid ---- */
   .frames-grid{
     display:grid;
@@ -81,6 +68,25 @@
     line-height:1.3;
   }
 
+  /* ---- bracket buttons (move 1) ---- */
+  .bx{
+    font:inherit;
+    color:var(--ink);
+    background:none;
+    border:0;
+    padding:1px 2px;
+    cursor:pointer;
+    white-space:nowrap;
+  }
+  .bx.active{ background:var(--ink); color:var(--paper); }
+  .muted{ color:var(--muted); }
+
+  /* ---- crisp selection / current states ---- */
+  .notebook-row.selected{ background:var(--ink); color:var(--paper); margin:0 -8px; padding:6px 14px; }
+  .notebook-row.selected .count{ color:var(--paper); }
+  .page-thumb.current{ border:3px solid var(--ink); }
+  .page-thumb.current .cap{ background:var(--ink); color:var(--paper); padding:0 3px; }
+
   /* ================= LIBRARY ================= */
   .library{ display:flex; height:100%; }
   .lib-sidebar{
@@ -97,7 +103,7 @@
     padding:5px 7px;
     margin-bottom:12px;
   }
-  .find-field span{ color:var(--muted); font-size:12px; }
+  .find-field span{ font-size:12px; }
   .recent-row{ padding:5px 4px; }
   .hr{ height:1px; background:var(--ink); margin:6px 0; border:none; }
   .notebook-list{ display:flex; flex-direction:column; gap:1px; }
@@ -105,9 +111,7 @@
     display:flex; align-items:center; justify-content:space-between;
     padding:6px 6px;
   }
-  .notebook-row.selected{ background:var(--ink); color:var(--paper); }
   .notebook-row .count{ font-size:var(--caption); color:var(--muted); }
-  .notebook-row.selected .count{ color:var(--paper); }
   .add-notebook{
     margin-top:auto;
     display:flex; align-items:center; gap:6px;
@@ -118,14 +122,7 @@
   .lib-content{ flex:1; min-width:0; position:relative; padding:12px 14px 14px; }
   .lib-content-head{ display:flex; justify-content:space-between; align-items:flex-start; }
   .lib-title{ font-size:var(--title); font-weight:600; }
-  .lib-caption{ margin-top:2px; font-size:var(--caption); color:var(--muted); }
-  .icon-btn{
-    background:none; border:0; padding:3px;
-    display:inline-flex; align-items:center; justify-content:center;
-    color:var(--ink); font:inherit;
-  }
-  .icon-btn.active{ background:var(--ink); }
-  .icon-btn.active .icon{ color:var(--paper); stroke:var(--paper); }
+  .lib-caption{ margin-top:6px; font-size:var(--caption); color:var(--muted); }
 
   .thumb-grid{
     display:grid; grid-template-columns:repeat(4, 1fr); gap:9px;
@@ -142,27 +139,32 @@
   .popover{
     position:absolute; top:34px; right:14px; z-index:5;
     background:var(--paper); border:1.5px solid var(--ink);
-    min-width:112px;
+    min-width:168px;
   }
-  .popover .prow{ padding:8px 12px; }
   .popover .prow + .prow{ border-top:1px solid var(--ink); }
 
   /* ================= EDITOR ================= */
   .editor{ position:relative; height:100%; display:flex; flex-direction:column; }
   .bar{
     flex:0 0 auto; height:34px;
-    display:flex; align-items:center; justify-content:space-between;
+    display:flex; align-items:center;
     padding:0 10px;
     border-bottom:1px solid var(--ink);
     position:relative; z-index:2; background:var(--paper);
   }
   .bar-group{ display:flex; align-items:center; gap:13px; }
+  .bar-filler{ flex:1; text-align:center; color:var(--muted); letter-spacing:2px; }
   .counter{ font-size:var(--body); padding:2px 5px; }
   .counter.active{ background:var(--ink); color:var(--paper); }
 
+  .bar.selection{ justify-content:space-between; }
   .bar.selection .bar-group.right{ gap:16px; }
-  .bar .verb{ font-size:var(--body); }
-  .bar .selection-label{ font-size:var(--body); }
+  .bar .status-label{ font-size:var(--body); }
+
+  .jump-line{
+    flex:0 0 auto; position:relative; z-index:2; background:var(--paper);
+    padding:4px 10px 6px; font-size:var(--caption);
+  }
 
   .canvas{ position:relative; flex:1; min-height:0; background:var(--paper); }
   .page-svg{ width:100%; height:100%; display:block; }
@@ -172,8 +174,12 @@
 
   .hidden-menu{
     position:absolute; top:10px; left:10px; z-index:4;
-    display:inline-flex; align-items:center; justify-content:center;
-    padding:4px;
+  }
+
+  .gesture-badge{
+    position:absolute; left:50%; bottom:14px; transform:translateX(-50%);
+    border:1.5px solid var(--ink); background:var(--paper);
+    padding:5px 10px; font-size:var(--caption); white-space:nowrap;
   }
 
   /* panels */
@@ -182,42 +188,23 @@
     background:var(--paper); border:1.5px solid var(--ink);
     padding:8px 0;
   }
-  .panel .prow{ padding:7px 12px; display:flex; align-items:center; justify-content:space-between; }
-  .panel .prow.plain{ display:block; }
+  .panel .prow{ padding:8px 12px; }
   .panel .hr{ margin:6px 0; }
 
   /* tool panel */
   .tool-panel{ left:44px; width:236px; padding:10px 10px 12px; }
-  .tool-row{ display:flex; gap:5px; }
-  .tool-slot{
-    width:28px; height:28px;
-    display:flex; align-items:center; justify-content:center;
-    border:1.5px solid transparent;
-  }
-  .tool-slot.active{ background:var(--ink); }
-  .tool-slot.active .icon{ color:var(--paper); stroke:var(--paper); }
+  .tool-row{ display:flex; flex-wrap:wrap; gap:6px 10px; }
   .tool-panel .hr{ margin:9px 0; }
-  .swatch-row{ display:flex; align-items:center; justify-content:space-between; margin-top:8px; }
-  .swatch-row .label{ color:var(--muted); font-size:var(--caption); }
-  .swatches{ display:flex; align-items:center; gap:6px; }
-  .swatch{
-    width:22px; height:22px;
-    display:flex; align-items:center; justify-content:center;
-    border:1.5px solid transparent;
-  }
-  .swatch.selected{ border-color:var(--ink); }
-  .dot{ border-radius:50%; background:var(--ink); }
-  .dot.sm{ width:6px; height:6px; }
-  .dot.md{ width:10px; height:10px; }
-  .dot.lg{ width:14px; height:14px; }
-  .sq{ width:14px; height:14px; }
-  .sq.black{ background:var(--ink); }
-  .sq.grey{ background:var(--muted); }
-  .sq.white{ background:var(--paper); border:1px solid var(--ink); }
-  .chip{ font-size:var(--caption); padding:2px 6px; }
-  .chip.active{ background:var(--ink); color:var(--paper); }
-  .chip-row{ display:flex; align-items:center; gap:4px; }
-  .chip-sep{ color:var(--muted); font-size:var(--caption); }
+  .rate-row{ display:flex; align-items:center; justify-content:space-between; margin-top:8px; }
+  .tool-panel .hr + .rate-row{ margin-top:0; }
+  .rate-row .label{ color:var(--muted); font-size:var(--caption); }
+  .rate{ display:flex; align-items:center; gap:6px; }
+  .rate .rate-val{ min-width:30px; text-align:center; font-size:var(--body); }
+
+  /* confirmation variants (muted preview of a destructive action) */
+  .confirm-variant{ color:var(--muted); font-size:var(--caption); line-height:1.6; }
+  .confirm-variant .bx{ color:var(--muted); }
+  .page-confirm{ padding:8px 12px 0; }
 
   /* page panel */
   .page-panel{ left:64px; width:266px; padding:0 0 8px; }
@@ -225,7 +212,6 @@
     display:flex; align-items:center; justify-content:space-between;
     padding:9px 12px; border-bottom:1px solid var(--ink);
   }
-  .page-nav .side{ display:flex; align-items:center; gap:4px; }
   .page-thumbs{
     display:flex; align-items:center; justify-content:center; gap:8px;
     padding:10px 12px; border-bottom:1px solid var(--ink);
@@ -236,18 +222,14 @@
     display:flex; align-items:center; justify-content:center;
     font-size:var(--caption);
   }
-  .page-thumb.current{
-    background:var(--ink); color:var(--paper);
-    outline:2px solid var(--ink); outline-offset:3px;
-  }
   .page-actions{
     display:flex; align-items:center; justify-content:space-between;
     padding:9px 12px 0;
   }
-  .page-actions .side{ display:flex; align-items:center; gap:5px; }
 
   /* more panel */
   .more-panel{ right:10px; width:196px; padding:6px 0; }
+  .more-panel.after-jump{ top:58px; }
   .more-panel .prow{ padding:8px 12px; }
 
   /* quick find panel */
@@ -262,10 +244,18 @@
     padding-bottom:9px; margin-bottom:8px;
     border-bottom:1px solid var(--ink);
   }
+  .qf-field .qf-icon{ color:var(--muted); font-size:13px; }
   .qf-field .caret{ width:1.5px; height:14px; background:var(--ink); }
-  .qf-results .prow{ padding:6px 2px; display:block; }
+  .qf-results .prow{ padding:6px 2px; }
   .qf-results .prow.secondary{ color:var(--muted); }
   .qf-results .hr{ margin:7px 0; }
+
+  /* empty library */
+  .empty-lib{
+    height:100%; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:14px; text-align:center; padding:20px;
+  }
+  .empty-line{ margin:0; color:var(--muted); font-size:var(--body); }
 
   @media (max-width:640px){
     header.page{ padding-top:32px; }
@@ -275,53 +265,10 @@
 </head>
 <body>
 
-<!-- Inline icon sprite: simple stroke-only line glyphs, no icon library. -->
-<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
-  <defs>
-    <symbol id="i-menu" viewBox="0 0 24 24">
-      <line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/>
-    </symbol>
-    <symbol id="i-pen" viewBox="0 0 24 24">
-      <line x1="5" y1="19" x2="17" y2="7"/><line x1="14" y1="4" x2="20" y2="10"/>
-    </symbol>
-    <symbol id="i-pencil" viewBox="0 0 24 24">
-      <line x1="5" y1="19" x2="16" y2="8"/><polyline points="13,5 19,6 18,11"/>
-    </symbol>
-    <symbol id="i-marker" viewBox="0 0 24 24">
-      <line x1="6" y1="19" x2="15" y2="10"/><line x1="9" y1="22" x2="18" y2="13"/><line x1="15" y1="10" x2="18" y2="13"/>
-    </symbol>
-    <symbol id="i-eraser" viewBox="0 0 24 24">
-      <rect x="5" y="11" width="14" height="7"/><line x1="9" y1="11" x2="15" y2="5"/><line x1="15" y1="5" x2="21" y2="11"/>
-    </symbol>
-    <symbol id="i-lasso" viewBox="0 0 24 24">
-      <ellipse cx="12" cy="10" rx="7" ry="5" stroke-dasharray="3 2"/><line x1="12" y1="15" x2="16" y2="20"/>
-    </symbol>
-    <symbol id="i-search" viewBox="0 0 24 24">
-      <circle cx="10" cy="10" r="6"/><line x1="14.5" y1="14.5" x2="20" y2="20"/>
-    </symbol>
-    <symbol id="i-more" viewBox="0 0 24 24">
-      <circle cx="6" cy="12" r="1.5" fill="currentColor" stroke="none"/>
-      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/>
-      <circle cx="18" cy="12" r="1.5" fill="currentColor" stroke="none"/>
-    </symbol>
-    <symbol id="i-close" viewBox="0 0 24 24">
-      <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
-    </symbol>
-    <symbol id="i-back" viewBox="0 0 24 24">
-      <line x1="20" y1="12" x2="6" y2="12"/><polyline points="11,7 6,12 11,17"/>
-    </symbol>
-    <symbol id="i-chevron-r" viewBox="0 0 24 24"><polyline points="9,5 15,12 9,19"/></symbol>
-    <symbol id="i-chevron-l" viewBox="0 0 24 24"><polyline points="15,5 9,12 15,19"/></symbol>
-    <symbol id="i-plus" viewBox="0 0 24 24">
-      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-    </symbol>
-  </defs>
-</svg>
-
 <div class="wrap">
   <header class="page">
-    <h1>NomadNotes: Things on e-ink</h1>
-    <p>Nine chrome states from the redesign spec — static frames, one refresh apart.</p>
+    <h1>NomadNotes, with character</h1>
+    <p>things 3 structure, bash.org manners.</p>
   </header>
 
   <div class="frames-grid">
@@ -331,39 +278,46 @@
       <div class="device-frame">
         <div class="library">
           <div class="lib-sidebar">
-            <div class="find-field"><svg class="icon xs"><use href="#i-search"/></svg><span>Find</span></div>
-            <div class="recent-row">Recent</div>
+            <div class="find-field"><span class="muted">find…</span></div>
+            <div class="recent-row">recent</div>
+            <div class="recent-row"><span class="bx">[random page]</span></div>
             <hr class="hr">
             <div class="notebook-list">
-              <div class="notebook-row"><span>Inbox</span></div>
-              <div class="notebook-row selected"><span>Thesis</span><span class="count">24</span></div>
-              <div class="notebook-row"><span>Sketches</span><span class="count">3</span></div>
-              <div class="notebook-row"><span>Meetings</span><span class="count">12</span></div>
+              <div class="notebook-row"><span>inbox</span></div>
+              <div class="notebook-row selected">
+                <span>thesis</span>
+                <span class="count">24 pp.</span>
+              </div>
+              <div class="notebook-row"><span>sketches</span><span class="count">3 pp.</span></div>
+              <div class="notebook-row"><span>meetings</span><span class="count">12 pp.</span></div>
             </div>
-            <div class="add-notebook"><svg class="icon xs"><use href="#i-plus"/></svg><span>Notebook</span></div>
+            <div class="add-notebook"><span class="bx">[+ notebook]</span></div>
           </div>
           <div class="lib-content">
             <div class="lib-content-head">
-              <div><div class="lib-title">Thesis</div><div class="lib-caption">24 pages</div></div>
-              <button class="icon-btn"><svg class="icon sm"><use href="#i-more"/></svg></button>
+              <div>
+                <div class="lib-title">thesis</div>
+                <div class="lib-caption">24 pages · last scribbled 2 h ago</div>
+              </div>
+              <span class="bx">[⋯]</span>
             </div>
             <div class="thumb-grid">
-              <div class="thumb"><div class="box"></div><span class="num">1</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">2</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">3</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">4</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">5</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">6</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">7</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">8</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">9</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">10</span></div>
-              <div class="thumb thumb-plus"><div class="box"><svg class="icon sm"><use href="#i-plus"/></svg></div></div>
+              <div class="thumb"><div class="box"></div><span class="num">#1</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#2</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#3</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#4</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#5</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#6</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#7</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#8</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#9</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#10</span></div>
+              <div class="thumb thumb-plus"><div class="box"><span class="bx">[+]</span></div><span class="num">one more</span></div>
             </div>
           </div>
         </div>
       </div>
-      <figcaption>1. Library</figcaption>
+      <figcaption>1. library</figcaption>
     </figure>
 
     <!-- 2. LIBRARY — ⋯ POPOVER -->
@@ -371,36 +325,45 @@
       <div class="device-frame">
         <div class="library">
           <div class="lib-sidebar">
-            <div class="find-field"><svg class="icon xs"><use href="#i-search"/></svg><span>Find</span></div>
-            <div class="recent-row">Recent</div>
+            <div class="find-field"><span class="muted">find…</span></div>
+            <div class="recent-row">recent</div>
+            <div class="recent-row"><span class="bx">[random page]</span></div>
             <hr class="hr">
             <div class="notebook-list">
-              <div class="notebook-row"><span>Inbox</span></div>
-              <div class="notebook-row selected"><span>Thesis</span><span class="count">24</span></div>
-              <div class="notebook-row"><span>Sketches</span><span class="count">3</span></div>
-              <div class="notebook-row"><span>Meetings</span><span class="count">12</span></div>
+              <div class="notebook-row"><span>inbox</span></div>
+              <div class="notebook-row selected">
+                <span>thesis</span>
+                <span class="count">24 pp.</span>
+              </div>
+              <div class="notebook-row"><span>sketches</span><span class="count">3 pp.</span></div>
+              <div class="notebook-row"><span>meetings</span><span class="count">12 pp.</span></div>
             </div>
-            <div class="add-notebook"><svg class="icon xs"><use href="#i-plus"/></svg><span>Notebook</span></div>
+            <div class="add-notebook"><span class="bx">[+ notebook]</span></div>
           </div>
           <div class="lib-content">
             <div class="lib-content-head">
-              <div><div class="lib-title">Thesis</div><div class="lib-caption">24 pages</div></div>
-              <button class="icon-btn active"><svg class="icon sm"><use href="#i-more"/></svg></button>
+              <div>
+                <div class="lib-title">thesis</div>
+                <div class="lib-caption">24 pages · last scribbled 2 h ago</div>
+              </div>
+              <span class="bx active">[⋯]</span>
             </div>
             <div class="thumb-grid">
-              <div class="thumb"><div class="box"></div><span class="num">1</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">2</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">3</span></div>
-              <div class="thumb"><div class="box"></div><span class="num">4</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#1</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#2</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#3</span></div>
+              <div class="thumb"><div class="box"></div><span class="num">#4</span></div>
             </div>
             <div class="popover">
-              <div class="prow">Rename</div>
-              <div class="prow">Delete</div>
+              <div class="prow"><span class="bx">[rename]</span></div>
+              <div class="prow"><span class="bx">[delete]</span></div>
+              <hr class="hr">
+              <div class="prow confirm-variant">delete thesis? all 24 pages.<br><span class="bx">[yes, burn it]</span> <span class="bx">[no]</span></div>
             </div>
           </div>
         </div>
       </div>
-      <figcaption>2. Library — notebook menu</figcaption>
+      <figcaption>2. library — ⋯ popover</figcaption>
     </figure>
 
     <!-- 3. EDITOR AT REST -->
@@ -409,13 +372,14 @@
         <div class="editor">
           <div class="bar">
             <div class="bar-group left">
-              <button class="icon-btn"><svg class="icon"><use href="#i-menu"/></svg></button>
-              <button class="icon-btn"><svg class="icon"><use href="#i-pen"/></svg></button>
-              <span class="counter">12 / 40</span>
+              <span class="bx">[≡]</span>
+              <span class="bx">[✎ pen]</span>
+              <span class="counter">#12 of 40</span>
             </div>
+            <span class="bar-filler">·····</span>
             <div class="bar-group right">
-              <button class="icon-btn"><svg class="icon"><use href="#i-search"/></svg></button>
-              <button class="icon-btn"><svg class="icon"><use href="#i-more"/></svg></button>
+              <span class="bx">[⌕]</span>
+              <span class="bx">[⋯]</span>
             </div>
           </div>
           <div class="canvas">
@@ -444,10 +408,11 @@
               <path class="ink" d="M120,122 q10,-14 20,0 q8,12 16,-2 q6,-8 12,0"/>
               <path class="ink" d="M40,154 q10,-12 18,-2 q6,12 14,0"/>
             </svg>
+            <div class="gesture-badge">undo. nobody saw that.</div>
           </div>
         </div>
       </div>
-      <figcaption>3. Editor at rest</figcaption>
+      <figcaption>3. editor at rest — siblings: “redo. changed your mind again.”, “lasso ready. draw a loop.”</figcaption>
     </figure>
 
     <!-- 4. EDITOR — TOOL PANEL -->
@@ -456,13 +421,14 @@
         <div class="editor">
           <div class="bar">
             <div class="bar-group left">
-              <button class="icon-btn"><svg class="icon"><use href="#i-menu"/></svg></button>
-              <button class="icon-btn active"><svg class="icon"><use href="#i-pen"/></svg></button>
-              <span class="counter">12 / 40</span>
+              <span class="bx">[≡]</span>
+              <span class="bx active">[✎ pen]</span>
+              <span class="counter">#12 of 40</span>
             </div>
+            <span class="bar-filler">·····</span>
             <div class="bar-group right">
-              <button class="icon-btn"><svg class="icon"><use href="#i-search"/></svg></button>
-              <button class="icon-btn"><svg class="icon"><use href="#i-more"/></svg></button>
+              <span class="bx">[⌕]</span>
+              <span class="bx">[⋯]</span>
             </div>
           </div>
           <div class="canvas">
@@ -489,42 +455,30 @@
             </svg>
             <div class="panel tool-panel">
               <div class="tool-row">
-                <div class="tool-slot active"><svg class="icon sm"><use href="#i-pen"/></svg></div>
-                <div class="tool-slot"><svg class="icon sm"><use href="#i-pencil"/></svg></div>
-                <div class="tool-slot"><svg class="icon sm"><use href="#i-marker"/></svg></div>
-                <div class="tool-slot"><svg class="icon sm"><use href="#i-eraser"/></svg></div>
-                <div class="tool-slot"><svg class="icon sm"><use href="#i-lasso"/></svg></div>
+                <span class="bx active">[pen]</span>
+                <span class="bx">[pencil]</span>
+                <span class="bx">[marker]</span>
+                <span class="bx">[eraser]</span>
+                <span class="bx">[lasso]</span>
               </div>
               <hr class="hr">
-              <div class="swatch-row">
-                <span class="label">Width</span>
-                <div class="swatches">
-                  <div class="swatch"><span class="dot sm"></span></div>
-                  <div class="swatch selected"><span class="dot md"></span></div>
-                  <div class="swatch"><span class="dot lg"></span></div>
-                </div>
+              <div class="rate-row">
+                <span class="label">width</span>
+                <span class="rate"><span class="bx">[−]</span><span class="rate-val">3</span><span class="bx">[+]</span></span>
               </div>
-              <div class="swatch-row">
-                <span class="label">Shade</span>
-                <div class="swatches">
-                  <div class="swatch selected"><span class="sq black"></span></div>
-                  <div class="swatch"><span class="sq grey"></span></div>
-                  <div class="swatch"><span class="sq white"></span></div>
-                </div>
+              <div class="rate-row">
+                <span class="label">shade</span>
+                <span class="rate"><span class="bx">[−]</span><span class="rate-val">dark</span><span class="bx">[+]</span></span>
               </div>
-              <div class="swatch-row">
-                <span class="label">Smoothing</span>
-                <div class="chip-row">
-                  <span class="chip active">Auto</span>
-                  <span class="chip-sep">·</span>
-                  <span class="chip">Off</span>
-                </div>
+              <div class="rate-row">
+                <span class="label">smoothing</span>
+                <span class="rate"><span class="bx active">[auto]</span><span class="bx">[off]</span></span>
               </div>
             </div>
           </div>
         </div>
       </div>
-      <figcaption>4. Editor — Tool panel</figcaption>
+      <figcaption>4. editor — tool panel</figcaption>
     </figure>
 
     <!-- 5. EDITOR — PAGE PANEL -->
@@ -533,13 +487,14 @@
         <div class="editor">
           <div class="bar">
             <div class="bar-group left">
-              <button class="icon-btn"><svg class="icon"><use href="#i-menu"/></svg></button>
-              <button class="icon-btn"><svg class="icon"><use href="#i-pen"/></svg></button>
-              <span class="counter active">12 / 40</span>
+              <span class="bx">[≡]</span>
+              <span class="bx">[✎ pen]</span>
+              <span class="counter active">#12 of 40</span>
             </div>
+            <span class="bar-filler">·····</span>
             <div class="bar-group right">
-              <button class="icon-btn"><svg class="icon"><use href="#i-search"/></svg></button>
-              <button class="icon-btn"><svg class="icon"><use href="#i-more"/></svg></button>
+              <span class="bx">[⌕]</span>
+              <span class="bx">[⋯]</span>
             </div>
           </div>
           <div class="canvas">
@@ -565,26 +520,27 @@
             </svg>
             <div class="panel page-panel">
               <div class="page-nav">
-                <span class="side"><svg class="icon xs"><use href="#i-chevron-l"/></svg>Prev</span>
-                <span>12 / 40</span>
-                <span class="side">Next<svg class="icon xs"><use href="#i-chevron-r"/></svg></span>
+                <span class="bx">[‹ prev]</span>
+                <span>#12 of 40</span>
+                <span class="bx">[next ›]</span>
               </div>
               <div class="page-thumbs">
-                <div class="page-thumb">10</div>
-                <div class="page-thumb">11</div>
-                <div class="page-thumb current">12</div>
-                <div class="page-thumb">13</div>
-                <div class="page-thumb">14</div>
+                <div class="page-thumb">#10</div>
+                <div class="page-thumb">#11</div>
+                <div class="page-thumb current"><span class="cap">#12</span></div>
+                <div class="page-thumb">#13</div>
+                <div class="page-thumb">#14</div>
               </div>
               <div class="page-actions">
-                <span class="side"><svg class="icon xs"><use href="#i-plus"/></svg>Page after this</span>
-                <span>Delete page</span>
+                <span class="bx">[+ page after this]</span>
+                <span class="bx">[delete]</span>
               </div>
+              <div class="confirm-variant page-confirm">delete #12? <span class="bx">[yes]</span> <span class="bx">[no, keep]</span></div>
             </div>
           </div>
         </div>
       </div>
-      <figcaption>5. Editor — Page panel</figcaption>
+      <figcaption>5. editor — page panel</figcaption>
     </figure>
 
     <!-- 6. EDITOR — MORE PANEL, AFTER LINK JUMP -->
@@ -593,16 +549,17 @@
         <div class="editor">
           <div class="bar">
             <div class="bar-group left">
-              <button class="icon-btn"><svg class="icon"><use href="#i-menu"/></svg></button>
-              <button class="icon-btn"><svg class="icon"><use href="#i-pen"/></svg></button>
-              <span class="counter">7 / 40</span>
-              <button class="icon-btn"><svg class="icon"><use href="#i-back"/></svg></button>
+              <span class="bx">[≡]</span>
+              <span class="bx">[✎ pen]</span>
+              <span class="counter">#7 of 40</span>
             </div>
+            <span class="bar-filler">·····</span>
             <div class="bar-group right">
-              <button class="icon-btn"><svg class="icon"><use href="#i-search"/></svg></button>
-              <button class="icon-btn active"><svg class="icon"><use href="#i-more"/></svg></button>
+              <span class="bx">[⌕]</span>
+              <span class="bx active">[⋯]</span>
             </div>
           </div>
+          <div class="jump-line"><span class="bx">[← back to research #3]</span></div>
           <div class="canvas">
             <svg class="page-svg" viewBox="0 0 400 520" preserveAspectRatio="none">
               <line class="rule" x1="24" y1="40" x2="376" y2="40"/>
@@ -624,19 +581,19 @@
               <path class="ink" d="M40,64 q8,-16 16,-2 q8,14 16,-4 q6,-12 14,0 q6,10 12,-2"/>
               <path class="ink" d="M112,62 q10,-14 18,0 q8,12 16,-4 q8,-10 14,2"/>
             </svg>
-            <div class="panel more-panel">
-              <div class="prow">Layers<svg class="icon xs"><use href="#i-chevron-r"/></svg></div>
-              <div class="prow">Template<svg class="icon xs"><use href="#i-chevron-r"/></svg></div>
-              <div class="prow plain">Insert image</div>
+            <div class="panel more-panel after-jump">
+              <div class="prow"><span class="bx">[layers ›]</span></div>
+              <div class="prow"><span class="bx">[template ›]</span></div>
+              <div class="prow"><span class="bx">[insert image]</span></div>
               <hr class="hr">
-              <div class="prow plain">Undo</div>
-              <div class="prow plain">Redo</div>
-              <div class="prow plain">Hide toolbar</div>
+              <div class="prow"><span class="bx">[undo]</span></div>
+              <div class="prow"><span class="bx">[redo]</span></div>
+              <div class="prow"><span class="bx">[hide toolbar]</span></div>
             </div>
           </div>
         </div>
       </div>
-      <figcaption>6. Editor — More panel, after a link jump</figcaption>
+      <figcaption>6. editor — more panel, after a link jump</figcaption>
     </figure>
 
     <!-- 7. EDITOR — LASSO SELECTION -->
@@ -645,13 +602,13 @@
         <div class="editor">
           <div class="bar selection">
             <div class="bar-group left">
-              <button class="icon-btn"><svg class="icon"><use href="#i-close"/></svg></button>
-              <span class="selection-label">Selection</span>
+              <span class="bx">[×]</span>
+              <span class="status-label">14 strokes caught</span>
             </div>
             <div class="bar-group right">
-              <span class="verb">Copy</span>
-              <span class="verb">Link</span>
-              <span class="verb">Delete</span>
+              <span class="bx">[copy]</span>
+              <span class="bx">[link]</span>
+              <span class="bx">[delete]</span>
             </div>
           </div>
           <div class="canvas">
@@ -682,7 +639,7 @@
           </div>
         </div>
       </div>
-      <figcaption>7. Editor — Lasso selection</figcaption>
+      <figcaption>7. editor — lasso selection</figcaption>
     </figure>
 
     <!-- 8. EDITOR — QUICK FIND -->
@@ -691,13 +648,14 @@
         <div class="editor">
           <div class="bar">
             <div class="bar-group left">
-              <button class="icon-btn"><svg class="icon"><use href="#i-menu"/></svg></button>
-              <button class="icon-btn"><svg class="icon"><use href="#i-pen"/></svg></button>
-              <span class="counter">12 / 40</span>
+              <span class="bx">[≡]</span>
+              <span class="bx">[✎ pen]</span>
+              <span class="counter">#12 of 40</span>
             </div>
+            <span class="bar-filler">·····</span>
             <div class="bar-group right">
-              <button class="icon-btn active"><svg class="icon"><use href="#i-search"/></svg></button>
-              <button class="icon-btn"><svg class="icon"><use href="#i-more"/></svg></button>
+              <span class="bx active">[⌕]</span>
+              <span class="bx">[⋯]</span>
             </div>
           </div>
           <div class="canvas">
@@ -724,22 +682,22 @@
             </svg>
             <div class="panel qf-panel">
               <div class="qf-field">
-                <svg class="icon sm"><use href="#i-search"/></svg>
+                <span class="qf-icon">⌕</span>
                 <span>th</span>
                 <span class="caret"></span>
               </div>
               <div class="qf-results">
-                <div class="prow">Thesis</div>
-                <div class="prow">Thesis · p. 12</div>
-                <div class="prow">Thesis · p. 3</div>
+                <div class="prow">thesis</div>
+                <div class="prow">thesis #12</div>
+                <div class="prow">thesis #3</div>
                 <hr class="hr">
-                <div class="prow secondary">Links here</div>
+                <div class="prow secondary">3 pages point here</div>
               </div>
             </div>
           </div>
         </div>
       </div>
-      <figcaption>8. Editor — Quick Find</figcaption>
+      <figcaption>8. editor — quick find (no matches: “nothing. try fewer letters.”)</figcaption>
     </figure>
 
     <!-- 9. EDITOR — CHROME HIDDEN -->
@@ -770,11 +728,27 @@
               <path class="ink" d="M162,92 q8,-12 16,0 q6,10 14,-2"/>
               <path class="ink" d="M40,124 q8,-12 16,0 q10,12 18,-4 q6,-10 12,2"/>
             </svg>
-            <button class="icon-btn hidden-menu"><svg class="icon"><use href="#i-menu"/></svg></button>
+            <span class="bx hidden-menu">[≡]</span>
           </div>
         </div>
       </div>
-      <figcaption>9. Editor — chrome hidden</figcaption>
+      <figcaption>9. editor — chrome hidden</figcaption>
+    </figure>
+
+    <!-- 10. LIBRARY — EMPTY -->
+    <figure class="frame-card">
+      <div class="device-frame">
+        <div class="library">
+          <div class="lib-sidebar">
+            <div class="add-notebook"><span class="bx">[+ notebook]</span></div>
+          </div>
+          <div class="lib-content empty-lib">
+            <p class="empty-line">no notebooks yet. the pen is bored.</p>
+            <span class="bx">[+ notebook]</span>
+          </div>
+        </div>
+      </div>
+      <figcaption>10. library — empty</figcaption>
     </figure>
 
   </div>
