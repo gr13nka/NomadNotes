@@ -54,3 +54,9 @@ before raw drawing captures any ink. Full steps are in `README.md` → *Device s
 - Landing page: `site/` — static HTML/CSS/JS, no build step, outside Gradle. The hero plays device
   recordings from `site/assets/` (file names and recording spec in `site/assets/README.md`); keep it
   black and white, one typeface, minimal copy.
+
+### Internal docs
+
+- `docs/internals/onyx-sdk.md` — licensing and distribution terms of the vendored Onyx SDK artifacts.
+- Project framing for Alps: `docs/project_pitch.md`, `docs/problem_analysis.md`, `docs/project_brief.md`;
+  interview log, filter report and market dossier in `docs/research/`.
