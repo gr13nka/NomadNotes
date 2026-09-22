@@ -149,8 +149,14 @@ down → set `captureMode = LASSO`; fingers up → restore the previous mode.
 
 - **Do not add a gesture settings screen.** These should work without configuration. A preferences
   panel is how this turns into a project instead of a convenience.
-- **Do not add more gestures than these.** Pinch-zoom, swipe-to-page, three-finger anything — out of
-  scope. Each gesture is a chance to fire by accident while a hand rests on the page.
+- **Do not add more gestures than these, plus the one-finger swipe added 2026-09-22.** A horizontal
+  one-finger drag on the page turns it (left = next, right = prev; see `FingerSwipe.kt` and
+  `PageSwipeGestures.kt`). It is finger-only, never the pen, because `AndroidPenBackend`'s finger *is*
+  its drawing tool and could not tell a swipe from an ordinary stroke; and one-finger-only because a
+  second pointer joining — a resting palm, or the start of a two/three-finger tap — safely aborts it
+  instead of racing the gestures above for the same touch stream. Pinch-zoom and any other multi- or
+  three-finger gesture beyond redo stay out of scope: each is still a chance to fire by accident while
+  a hand rests on the page.
 - **Do not touch the link features.** Boox's own Notes app now ships page linking; this project is
   not competing on that axis any more. See `docs/BRIEF.md`.
 - **Do not rewrite `Smoothing.kt`.** Calibrate it.

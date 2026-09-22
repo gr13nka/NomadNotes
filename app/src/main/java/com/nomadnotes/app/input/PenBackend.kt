@@ -174,5 +174,16 @@ interface PenBackend {
          * touch itself draws (the plain-touch backend) never calls it.
          */
         fun onLassoArmed()
+
+        /**
+         * A one-finger horizontal swipe to the left: go to the next page, the same direction a page
+         * turns in a book. Same register as [onUndoGesture] — intent, not gesture mechanics — and a
+         * backend where the finger is itself the drawing tool (the plain-touch backend) never calls
+         * it, since it could not tell a swipe from an ordinary stroke.
+         */
+        fun onSwipeNextPage()
+
+        /** A one-finger horizontal swipe the other way: go to the previous page. Mirrors [onSwipeNextPage]. */
+        fun onSwipePrevPage()
     }
 }

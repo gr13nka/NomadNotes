@@ -35,7 +35,7 @@ take its restraint from both, and take none of its motion.**
 | Completed rows dim; they don't strike through | §6 | Disabled or receded means 50 % grey text. Selected means inverted. Grey is never the only signal for something the user must act on. |
 | "Each animation is purposeful" | §8 | On e-ink the purposeful amount is **zero**. Every transition is a state change plus one refresh. |
 | Colour-coded lists | §4 | Glyph shape and type weight do the job colour did. Black and white only. |
-| Haptics on ambiguous gestures | §8 | One static, opaque badge drawn once when a gesture latches (`BadgeRenderer`). |
+| Haptics on ambiguous gestures | §8 | *(2026-09-22: superseded — see the dated note under "Voice: bash.org manners".)* Originally one static, opaque badge drawn once when a gesture latches (`BadgeRenderer`, now removed); the lasso hold instead inverts the bar's own tool bracket, and undo/redo need no separate feedback. |
 | No Done button: dismiss by touching elsewhere | §6 | A panel closes when you tap outside it or when the pen touches the page. |
 
 ### Not adopted, and why
@@ -64,7 +64,8 @@ take its restraint from both, and take none of its motion.**
    off (`updateBackendEnabled`, `:1501`), and the first pen touch outside the panel closes it and
    is *not* inked.
 5. **Opaque and non-antialiased where partial refresh draws it.** Text and glyphs over the canvas
-   use flat black on flat white, following the same reasoning as `BadgeRenderer`.
+   use flat black on flat white — the same reasoning `BadgeRenderer` once demonstrated for its badge
+   before that badge was removed (2026-09-22); the bar and panels still follow it.
 
 ## Tokens (`ui/Eink.kt` target state)
 
@@ -119,6 +120,15 @@ not ornament**. Hand-drawn marks and tilted sheets were tried and rejected.
   - The current page gets a 3 dp border and an inverted `#` caption.
 - **`[random page]`** (sidebar, under `recent`), after bash.org's "random": it opens a random
   old page from any notebook, for rediscovery.
+
+**2026-09-22: jokey copy and the gesture badges dropped.** At the user's request, copy that read as a
+joke rather than a label is gone — e.g. `%1$d strokes caught` → `%1$d strokes selected`, `link
+caught`/`image caught` → `link selected`/`image selected`, and the delete confirmation's yes/no →
+`[delete]`/`[cancel]`. The gesture badges (`undo. nobody saw that.`, `lasso ready. draw a loop.`, and
+the rest) are gone along with `BadgeRenderer` itself: undo/redo need no feedback beyond the page
+change, and the lasso hold now shows by inverting the bar's own tool bracket to `[✎ lasso]` instead of
+drawing a badge over the page. Brackets, `#` page IDs, and the `[+]`/`[−]` rating controls are
+unchanged — only wording that was trying to be funny was plained out.
 
 Mockups: `2026-09-18-things-eink-ui-mockups.html` shows every state with this voice. Where the
 ASCII sketches below differ in wording, the mockups and this section win.

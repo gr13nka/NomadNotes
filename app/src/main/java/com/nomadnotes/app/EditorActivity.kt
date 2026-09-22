@@ -54,7 +54,6 @@ import com.nomadnotes.app.input.AndroidPenBackend
 import com.nomadnotes.app.input.CaptureMode
 import com.nomadnotes.app.input.OnyxPenBackend
 import com.nomadnotes.app.input.PenBackend
-import com.nomadnotes.app.render.BadgeRenderer
 import com.nomadnotes.app.render.ImageResolver
 import com.nomadnotes.app.render.PageRenderer
 import com.nomadnotes.app.render.SelectionRenderer
@@ -216,9 +215,6 @@ internal class EditorActivity :
     // stroke takes through PageRenderer, so the previewed strokes look identical to the result).
     private val strokeRenderer = StrokeRenderer()
 
-    // Draws the bottom-of-surface acknowledgement badge (see [badgeText]).
-    private val badgeRenderer = BadgeRenderer()
-
     // Filtered scaling for the dragged image's preview, matching how PageRenderer draws a committed
     // one, so the picture does not change appearance the moment the pen lifts.
     private val imagePreviewPaint = Paint(Paint.FILTER_BITMAP_FLAG)
@@ -283,21 +279,18 @@ internal class EditorActivity :
     // a stroke and cancelled by the next pen-down (see [scheduleInkSettle]).
     private var pendingInkSettle: Runnable? = null
 
-    // The short message drawn over the page, or null. It is either the armed-lasso badge — live until
-    // the latched stroke completes or [LASSO_LATCH_MS] expires — or a transient acknowledgement of a
-    // gesture undo or redo, which [pendingHistorySettle] clears. The two never compete: the lasso badge
-    // is set and cleared by [armLassoForNextStroke]/[clearLassoLatch], and an undo/redo while the lasso
-    // is armed simply overwrites it with the undo/redo text, which the settle then clears back to null
-    // rather than restoring the lasso badge — acceptable because a gesture undo/redo and an armed
-    // lasso latch are not expected to overlap.
-    private var badgeText: String? = null
+    // The pending clean refresh that clears the ghosting a burst of undo/redo gestures leaves on the
+    // panel (see [scheduleHistorySettle]); the page change itself is the gesture's only feedback now,
+    // so this settle has nothing left to clear but the ghost.
     private var pendingHistorySettle: Runnable? = null
 
-    // Whether the lasso latch a two-finger hold armed is currently on. A plain field, not Compose
-    // state — it only ever feeds [applyCaptureMode] and the badge, and no composable reads it. Set by
-    // [armLassoForNextStroke], cleared by [clearLassoLatch]; see [armLassoForNextStroke]'s doc for why
-    // it covers exactly one pen stroke rather than staying on for as long as the fingers are held.
-    private var lassoLatched = false
+    // Whether the lasso latch a two-finger hold armed is currently on. Compose state, unlike most
+    // backend-facing flags here, because the bar's tool bracket reads it through [currentEditorTool]
+    // to show `[✎ lasso]` while armed — the gesture's only feedback now that the surface badge is
+    // gone. Set by [armLassoForNextStroke], cleared by [clearLassoLatch]; see [armLassoForNextStroke]'s
+    // doc for why it covers exactly one pen stroke rather than staying on for as long as the fingers
+    // are held.
+    private var uiLassoLatched by mutableStateOf(false)
 
     // The pending [clearLassoLatch] that fires if the lasso is armed but never drawn into, so the user
     // is never stranded in selection mode. Restarted by each new arm, cancelled once the latched
@@ -565,23 +558,19 @@ internal class EditorActivity :
     private fun present(cleanRefresh: Boolean = false) {
         val selection = selection
         val imageRect = circledImageRect()
-        val badge = badgeText
-        if (selection == null && imageRect == null && badge == null) presentComposite(cleanRefresh)
-        else presentDecorated(selection?.bounds, selectionPolygon, imageRect, badge, cleanRefresh)
+        if (selection == null && imageRect == null) presentComposite(cleanRefresh)
+        else presentDecorated(selection?.bounds, selectionPolygon, imageRect, cleanRefresh)
     }
 
     /**
      * Composites the page plus whichever decorations are live — the lasso [polygon], the selection
-     * [bounds] box, the frame around a circled image at [imageRect], the acknowledgement [badge] —
-     * into the scratch bitmap, then presents it. Any of them may be null; they are independent
-     * outcomes of one lasso or one gesture. The badge is drawn last, over everything else, since it
-     * is a transient overlay message rather than part of the page's own decoration.
+     * [bounds] box, the frame around a circled image at [imageRect] — into the scratch bitmap, then
+     * presents it. Any of them may be null; they are independent outcomes of one lasso gesture.
      */
     private fun presentDecorated(
         bounds: SelectionBounds?,
         polygon: List<Vec2>?,
         imageRect: PageRect?,
-        badge: String?,
         cleanRefresh: Boolean = false,
     ) {
         val scratch = decorationScratch()
@@ -594,7 +583,6 @@ internal class EditorActivity :
         polygon?.let { selectionRenderer.drawPolygon(canvas, it) }
         bounds?.let { selectionRenderer.drawBounds(canvas, it) }
         imageRect?.let { selectionRenderer.drawImageFrame(canvas, it) }
-        badge?.let { badgeRenderer.draw(canvas, it, surfaceWidth, surfaceHeight) }
         backend.present(scratch, cleanRefresh)
     }
 
@@ -660,6 +648,12 @@ internal class EditorActivity :
         override fun onRedoGesture() = redoByGesture()
 
         override fun onLassoArmed() = armLassoForNextStroke()
+
+        // Reuse the Page panel's own prev/next exactly, so a swipe gets the same boundary no-op (no
+        // page past the last, none before the first) and the same one-refresh chrome pause.
+        override fun onSwipeNextPage() = onNextPage()
+
+        override fun onSwipePrevPage() = onPrevPage()
     }
 
     /**
@@ -1333,9 +1327,9 @@ internal class EditorActivity :
     /**
      * Arms the lasso latch for exactly the next pen stroke, from a two-finger hold
      * ([PenBackend.Listener.onLassoArmed]). One stroke, not a held modifier like [selectLasso]'s
-     * toolbar tool: the fingers are free the instant this badge appears, because pausing raw drawing
-     * to switch into LASSO makes this firmware destroy the finger touch stream the hold was made of
-     * (see [com.nomadnotes.app.editor.MultiFingerGestures]'s KDoc) — there is no "the fingers are still
+     * toolbar tool: the fingers are free the instant this arms, because pausing raw drawing to switch
+     * into LASSO makes this firmware destroy the finger touch stream the hold was made of (see
+     * [com.nomadnotes.app.editor.MultiFingerGestures]'s KDoc) — there is no "the fingers are still
      * down" state left to hold the capture mode open with. So the latch instead covers exactly the
      * next pen gesture, released by [endLassoGesture] when that gesture finishes, or by
      * [LASSO_LATCH_MS] expiring if the user never draws into it.
@@ -1343,28 +1337,34 @@ internal class EditorActivity :
      * Re-arming while already latched (a second hold before the first stroke lands) restarts the
      * expiry window rather than doing nothing, so the user always gets the full window from their
      * latest hold.
+     *
+     * Goes through [withChromeRefresh] because the arming's only feedback is now the bar's tool
+     * bracket flipping to `[✎ lasso]` (see [currentEditorTool]), a Compose repaint that — like any
+     * other bar-mode change — needs raw drawing briefly paused to reach the panel. That costs the
+     * same [CHROME_REFRESH_MS] dead window every other chrome action already accepts; if a device
+     * pass ever shows the lasso's opening stroke landing as ink instead, this window is the first
+     * suspect.
      */
-    private fun armLassoForNextStroke() {
-        lassoLatched = true
+    private fun armLassoForNextStroke() = withChromeRefresh {
+        uiLassoLatched = true
         applyCaptureMode()
-        badgeText = getString(R.string.gesture_lasso)
         scheduleLassoLatchExpiry()
-        present()
     }
 
     /**
      * Releases the lasso latch [armLassoForNextStroke] set, restoring whatever capture mode the
-     * toolbar's own tool currently asks for. A no-op when nothing is latched, which is what makes this
-     * safe to call from [endLassoGesture] even when the toolbar's own [uiLasso] (not a two-finger
-     * hold) is what put the backend in LASSO mode.
+     * toolbar's own tool currently asks for and refreshing the bar so its tool bracket drops the
+     * `[✎ lasso]` label. A no-op when nothing is latched, which is what makes this safe to call from
+     * [endLassoGesture] even when the toolbar's own [uiLasso] (not a two-finger hold) is what put the
+     * backend in LASSO mode.
      */
     private fun clearLassoLatch() {
-        if (!lassoLatched) return
-        lassoLatched = false
+        if (!uiLassoLatched) return
         cancelLassoLatchExpiry()
-        badgeText = null
-        applyCaptureMode()
-        present()
+        withChromeRefresh {
+            uiLassoLatched = false
+            applyCaptureMode()
+        }
     }
 
     /**
@@ -1381,7 +1381,7 @@ internal class EditorActivity :
      */
     private fun applyCaptureMode() {
         backend.captureMode = when {
-            uiLasso || lassoLatched -> CaptureMode.LASSO
+            uiLasso || uiLassoLatched -> CaptureMode.LASSO
             uiEraser -> CaptureMode.ERASE
             else -> CaptureMode.INK
         }
@@ -1413,41 +1413,34 @@ internal class EditorActivity :
     }
 
     /**
-     * A two-finger tap: undo the last edit. Two problems the toolbar's Undo button does not have to
-     * solve, because this path bypasses it:
-     *
-     * Acknowledgement — a silent no-op reads the same on the panel as an undetected gesture, and the
-     * natural response to "nothing happened" is to tap harder and faster, which is exactly how an
-     * accidental undo happens. So both outcomes get a badge, with distinct text, not just the
-     * successful one.
+     * A two-finger tap: undo the last edit. The page change itself is the acknowledgement — no badge
+     * — so a tap with nothing to undo is silent, same as the toolbar's Undo button disabled.
      *
      * Ghosting — undo *removes* ink, which the fast additive e-ink update leaves faintly ghosted
      * behind. The repaint here is immediate but not a clean refresh, so a burst of undos stays cheap;
      * [scheduleHistorySettle] queues the one clean refresh that clears the ghosts once the burst pauses.
      *
-     * Deliberately not wrapped in [withChromeRefresh], unlike the toolbar's Undo button: the surface
-     * badge *is* the acknowledgement, so this path does not need to pause pen capture for a Compose
-     * frame right when the user is about to keep writing. The cost is that the toolbar's Undo/Redo
-     * buttons can show a stale enabled state on the panel until the next chrome refresh.
+     * Deliberately not wrapped in [withChromeRefresh], unlike the toolbar's Undo button: this path
+     * does not need to pause pen capture for a Compose frame right when the user is about to keep
+     * writing. The cost is that the toolbar's Undo/Redo buttons can show a stale enabled state on the
+     * panel until the next chrome refresh.
      */
     private fun undoByGesture() {
         val session = session ?: return
         val undone = session.undo()
-        badgeText = getString(if (undone) R.string.gesture_undone else R.string.gesture_nothing_to_undo)
         scheduleHistorySettle()
         if (undone) afterModelEdit() else present()
     }
 
     /**
-     * A three-finger tap: redo the last undone edit. Mirrors [undoByGesture] exactly — same
-     * acknowledgement badge, same ghosting settle, same reason for not wrapping in [withChromeRefresh]
-     * — because a redo that restores erased ink ghosts the panel exactly as an undo that removes ink
-     * does, just by the update running in the other direction.
+     * A three-finger tap: redo the last undone edit. Mirrors [undoByGesture] exactly — same ghosting
+     * settle, same reason for not wrapping in [withChromeRefresh] — because a redo that restores
+     * erased ink ghosts the panel exactly as an undo that removes ink does, just by the update
+     * running in the other direction.
      */
     private fun redoByGesture() {
         val session = session ?: return
         val redone = session.redo()
-        badgeText = getString(if (redone) R.string.gesture_redone else R.string.gesture_nothing_to_redo)
         scheduleHistorySettle()
         if (redone) afterModelEdit() else present()
     }
@@ -1719,18 +1712,15 @@ internal class EditorActivity :
     }
 
     /**
-     * Queues the deferred repaint that both retires the undo/redo acknowledgement badge and performs
-     * the clean refresh that clears the ghosting undo (or a redo that removes ink) leaves on the
-     * panel, once [HISTORY_SETTLE_MS] has passed without another undo or redo gesture. One repaint
-     * does both jobs rather than costing the panel two, and the window is what keeps a burst of rapid
-     * undos/redos cheap: each tap only repaints additively (see [undoByGesture]/[redoByGesture]), and
-     * the expensive clean pass waits for the burst to stop.
+     * Queues the deferred clean refresh that clears the ghosting undo (or a redo that removes ink)
+     * leaves on the panel, once [HISTORY_SETTLE_MS] has passed without another undo or redo gesture.
+     * The window is what keeps a burst of rapid undos/redos cheap: each tap only repaints additively
+     * (see [undoByGesture]/[redoByGesture]), and the expensive clean pass waits for the burst to stop.
      */
     private fun scheduleHistorySettle() {
         cancelHistorySettle()
         val settle = Runnable {
             pendingHistorySettle = null
-            badgeText = null
             present(cleanRefresh = true)
         }
         pendingHistorySettle = settle
@@ -2067,10 +2057,16 @@ internal class EditorActivity :
 
     // --- chrome state builders ---------------------------------------------------------------
 
-    /** The bar's own "current tool" input: the toolbar tool plus the eraser/lasso flags layered on top. */
+    /**
+     * The bar's own "current tool" input: the toolbar tool plus the eraser/lasso flags layered on
+     * top — including [uiLassoLatched], so a two-finger-hold arm shows `[✎ lasso]` even though the
+     * toolbar's own tool selection never changed. Lasso wins over eraser here, matching
+     * [applyCaptureMode]'s priority, so the bracket never claims eraser while a hold has actually
+     * latched the backend into LASSO.
+     */
     private fun currentEditorTool(): EditorTool = when {
+        uiLasso || uiLassoLatched -> EditorTool.LASSO
         uiEraser -> EditorTool.ERASER
-        uiLasso -> EditorTool.LASSO
         else -> when (uiTool) {
             Tool.PEN -> EditorTool.PEN
             Tool.PENCIL -> EditorTool.PENCIL
