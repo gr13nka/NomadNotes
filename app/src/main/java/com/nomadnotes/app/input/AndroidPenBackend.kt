@@ -88,6 +88,10 @@ class AndroidPenBackend(
         collector.setExcludeRects(rects)
     }
 
+    // Plain touch has no native notion of a restricted capture region; a caller that wants one (the
+    // sticker panel) falls back to its own Compose pointerInput capture instead.
+    override fun setCaptureRegion(rect: Rect?): Boolean = false
+
     override fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int) {
         inkTool = tool
         inkWidthBase = widthBase

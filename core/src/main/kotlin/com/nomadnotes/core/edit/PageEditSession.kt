@@ -4,6 +4,7 @@ import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.Layer
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.LinkId
+import com.nomadnotes.core.LinkSticker
 import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
@@ -25,8 +26,9 @@ import com.nomadnotes.core.StrokeId
  *  - Each mutating call that actually changes the page pushes one undo entry; a call that would
  *    change nothing (moving by zero, erasing ids that are absent, setting the visibility a layer
  *    already has, removing a link whose id is absent, retargeting a link to the target it already
- *    holds) is a no-op and leaves the history — including the redo stack — untouched. Where such a
- *    call has a boolean result ([removeLink], [setLinkTarget]) it returns false to report the no-op.
+ *    holds, setting a link's sticker to the one it already has) is a no-op and leaves the history
+ *    — including the redo stack — untouched. Where such a call has a boolean result ([removeLink],
+ *    [setLinkTarget], [setLinkSticker]) it returns false to report the no-op.
  *  - Any change clears the redo stack: once you edit after undoing, the undone future is gone.
  *  - The undo history is capped at [MAX_UNDO]; pushing past the cap discards the oldest entry,
  *    so only the most recent [MAX_UNDO] changes can be undone.
@@ -156,6 +158,19 @@ class PageEditSession(initialPage: Page) {
         val link = page.links.firstOrNull { it.id == id } ?: return false
         if (link.targetNotebookId == targetNotebookId && link.targetPageId == targetPageId) return false
         commit(SetLinkTarget(id, targetNotebookId, targetPageId))
+        return true
+    }
+
+    /**
+     * Sets the link with [id]'s sticker to [sticker] (null clears it). Returns false without
+     * changing anything when no link has that id, or when it already carries that exact sticker.
+     * Creating a link with its sticker already set (pass it to [addLink] directly) stays a single
+     * undo step; this method is for changing the sticker of a link that already exists.
+     */
+    fun setLinkSticker(id: LinkId, sticker: LinkSticker?): Boolean {
+        val link = page.links.firstOrNull { it.id == id } ?: return false
+        if (link.sticker == sticker) return false
+        commit(SetLinkSticker(id, sticker))
         return true
     }
 

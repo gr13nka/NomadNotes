@@ -1,6 +1,8 @@
 package com.nomadnotes.app.editor
 
 import com.nomadnotes.app.editor.TapClassifier.MAX_DURATION_MS
+import com.nomadnotes.app.editor.TapClassifier.MAX_LINK_DURATION_MS
+import com.nomadnotes.app.editor.TapClassifier.MAX_LINK_SPREAD_PX
 import com.nomadnotes.app.editor.TapClassifier.MAX_SPREAD_PX
 import com.nomadnotes.core.StrokePoint
 import org.junit.Assert.assertFalse
@@ -75,5 +77,42 @@ class TapClassifierTest {
             point(11f, 11f, MAX_DURATION_MS),
         )
         assertTrue(TapClassifier.isTap(points))
+    }
+
+    @Test
+    fun `a link tap tolerates spread and duration an ordinary tap would reject`() {
+        val points = listOf(
+            point(10f, 10f, 0L),
+            point(10f + MAX_SPREAD_PX + 1f, 10f, MAX_DURATION_MS + 50L),
+        )
+        assertFalse(TapClassifier.isTap(points))
+        assertTrue(TapClassifier.isLinkTap(points))
+    }
+
+    @Test
+    fun `a link tap still rejects a gesture wider than its own spread tolerance`() {
+        val points = listOf(
+            point(10f, 10f, 0L),
+            point(10f + MAX_LINK_SPREAD_PX + 1f, 10f, 50L),
+        )
+        assertFalse(TapClassifier.isLinkTap(points))
+    }
+
+    @Test
+    fun `a link tap still rejects a gesture slower than its own duration tolerance`() {
+        val points = listOf(
+            point(10f, 10f, 0L),
+            point(11f, 11f, MAX_LINK_DURATION_MS + 1),
+        )
+        assertFalse(TapClassifier.isLinkTap(points))
+    }
+
+    @Test
+    fun `a point exactly at the link spread limit is still a link tap`() {
+        val points = listOf(
+            point(10f, 10f, 0L),
+            point(10f + MAX_LINK_SPREAD_PX, 10f, MAX_LINK_DURATION_MS),
+        )
+        assertTrue(TapClassifier.isLinkTap(points))
     }
 }

@@ -45,6 +45,7 @@
 
     <!-- Chrome: bar glyphs -->
     <string name="chrome_library">≡</string>
+    <string name="chrome_links_map">⋈</string>
     <string name="chrome_find">⌕</string>
     <string name="chrome_more">⋯</string>
     <!-- The jump-back line under the bar (mockup screen 6: "[← back to research #3]"), one bracketed phrase. -->
@@ -71,6 +72,7 @@
     <string name="sel_link">link</string>
     <string name="sel_delete">delete</string>
     <string name="sel_edit_link">edit link</string>
+    <string name="sel_sticker">sticker</string>
     <string name="sel_delete_link">delete link</string>
     <string name="sel_delete_image">delete image</string>
     <string name="sel_paste">paste</string>
@@ -97,6 +99,21 @@
     <string name="page_panel_delete_confirm">delete #%1$d?</string>
     <string name="page_panel_delete_yes">delete</string>
     <string name="page_panel_delete_keep">cancel</string>
+
+    <!-- Chrome: sticker panel (drawn after picking a link's target, or from the link-edit "[sticker]" verb). -->
+    <string name="sticker_clear">clear</string>
+    <string name="sticker_skip">skip</string>
+    <string name="sticker_done">done</string>
+
+    <!-- Chrome: links map panel (spec §4 "Links mini map"). -->
+    <string name="map_header">map</string>
+    <string name="map_loading">loading</string>
+    <string name="map_empty">no links yet</string>
+    <string name="map_open">open</string>
+    <string name="map_centre">centre</string>
+    <string name="map_back">‹ back</string>
+    <!-- A neighbour chip's caption, e.g. "3 links"; always plural, like sel_strokes_caught above. -->
+    <string name="map_link_count">%1$d links</string>
 
     <!-- Chrome: More panel (root list, and the Layers/Template sub-page back row). -->
     <string name="more_layers">layers ›</string>

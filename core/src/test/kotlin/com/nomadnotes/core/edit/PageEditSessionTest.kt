@@ -3,6 +3,7 @@ package com.nomadnotes.core.edit
 import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.LinkId
+import com.nomadnotes.core.LinkSticker
 import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
@@ -57,6 +58,8 @@ class PageEditSessionTest {
     )
 
     private fun pageLinkIds(): List<LinkId> = session.page.links.map { it.id }
+
+    private fun sticker(strokeId: String) = LinkSticker(strokes = listOf(stroke(strokeId)))
 
     // --- addStroke -------------------------------------------------------------------------
 
@@ -360,6 +363,69 @@ class PageEditSessionTest {
         assertEquals("a no-op must not change the page", before, session.page)
         // No history entry was pushed: undoing the add is the only thing on the stack.
         assertTrue(session.undo())
+        assertFalse(session.canUndo)
+    }
+
+    @Test
+    fun `setLinkSticker sets the sticker and undo restores the null it replaced`() {
+        session.addLink(link("l1"))
+        val mark = sticker("mark-1")
+
+        assertTrue(session.setLinkSticker(LinkId("l1"), mark))
+        assertEquals(mark, session.page.links.first { it.id == LinkId("l1") }.sticker)
+
+        assertTrue(session.undo())
+        assertEquals(null, session.page.links.first { it.id == LinkId("l1") }.sticker)
+
+        assertTrue(session.redo())
+        assertEquals(mark, session.page.links.first { it.id == LinkId("l1") }.sticker)
+    }
+
+    @Test
+    fun `setLinkSticker to null clears an existing sticker and undo restores it`() {
+        session.addLink(link("l1"))
+        val mark = sticker("mark-1")
+        session.setLinkSticker(LinkId("l1"), mark)
+
+        assertTrue(session.setLinkSticker(LinkId("l1"), null))
+        assertEquals(null, session.page.links.first { it.id == LinkId("l1") }.sticker)
+
+        assertTrue(session.undo())
+        assertEquals(mark, session.page.links.first { it.id == LinkId("l1") }.sticker)
+    }
+
+    @Test
+    fun `setLinkSticker with the sticker it already has is a no-op`() {
+        session.addLink(link("l1"))
+        val mark = sticker("mark-1")
+        session.setLinkSticker(LinkId("l1"), mark)
+        val before = session.page
+
+        assertFalse(session.setLinkSticker(LinkId("l1"), mark))
+
+        assertEquals("a no-op must not change the page", before, session.page)
+    }
+
+    @Test
+    fun `setLinkSticker of absent id returns false and leaves history untouched`() {
+        session.addLink(link("l1"))
+        session.undo()
+        assertTrue(session.canRedo)
+
+        assertFalse(session.setLinkSticker(LinkId("ghost"), sticker("mark-1")))
+
+        assertFalse(session.canUndo)
+        assertTrue("a no-op must not clear the redo stack", session.canRedo)
+    }
+
+    @Test
+    fun `addLink with its sticker already set is a single undo step`() {
+        // Creating a link that already carries a sticker (the create flow, once the sticker panel
+        // commits before the link is added) must not cost a second undo entry.
+        session.addLink(link("l1").copy(sticker = sticker("mark-1")))
+
+        assertTrue(session.undo())
+        assertTrue(session.page.links.isEmpty())
         assertFalse(session.canUndo)
     }
 

@@ -61,6 +61,11 @@ Device traps that each cost a session:
   samples and OOM the app (`FountainInkSizer.normalizedPressure`). Raw-drawing callbacks arrive on
   the main thread on this firmware, so a slow stroke-end path is an ANR, not a lag.
 - An ANR on the device leaves its report in `adb shell dumpsys dropbox --print data_app_anr`.
+- A raw-drawing `limitRect` smaller than the surface delivers no strokes at all on this firmware. To
+  capture only a small region (the link-sticker box), keep the full surface as the limit and exclude
+  everything around the region (`OnyxPenBackend.setCaptureRegion`).
+- Ink scaled down for a thumbnail or sticker card fades to invisible hairlines on e-ink; draw such
+  small renders with a minimum stroke width (`PageThumbnails.kt`, `StickerRenderer`).
 
 ## Docs
 

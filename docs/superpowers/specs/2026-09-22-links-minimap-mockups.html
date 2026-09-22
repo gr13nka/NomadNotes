@@ -1,0 +1,466 @@
+<title>Links Mini Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#000;
+    --paper:#fff;
+    --muted:#808080;
+    --body:13px;
+    --caption:10px;
+  }
+  *{ box-sizing:border-box; }
+  html{ background:var(--paper); }
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-weight:400;
+    -webkit-font-smoothing:antialiased;
+    -moz-osx-font-smoothing:grayscale;
+  }
+
+  .wrap{ max-width:680px; margin:0 auto; padding-inline:16px; padding-block:40px 56px; }
+
+  header.page{ margin-bottom:28px; }
+  header.page h1{ margin:0; font-size:clamp(20px, 4vw, 26px); font-weight:500; letter-spacing:-0.02em; }
+  header.page p{ margin:8px 0 0; color:var(--muted); font-size:14px; }
+
+  /* ---- bracket buttons, shared with the rest of the chrome ---- */
+  .bx{
+    font:inherit;
+    color:var(--ink);
+    background:var(--paper);
+    border:0;
+    padding:2px 3px;
+    cursor:pointer;
+    white-space:nowrap;
+  }
+  .bx.active{ background:var(--ink); color:var(--paper); }
+  .bx:focus-visible{ outline:2px solid var(--ink); outline-offset:2px; }
+
+  /* ---- device frame ---- */
+  .device-frame{
+    position:relative;
+    width:100%;
+    max-width:620px;
+    margin:0 auto;
+    aspect-ratio:3/4;
+    background:var(--paper);
+    border:1.5px solid var(--ink);
+    overflow:hidden;
+    font-size:var(--body);
+    line-height:1.3;
+  }
+  .editor{ position:relative; height:100%; display:flex; flex-direction:column; }
+  .bar{
+    flex:0 0 auto; height:56px;
+    display:flex; align-items:center;
+    padding:0 12px;
+    border-bottom:1px solid var(--ink);
+    position:relative; z-index:2; background:var(--paper);
+  }
+  .bar-group{ display:flex; align-items:center; gap:14px; }
+  .bar-filler{ flex:1; text-align:center; color:var(--muted); letter-spacing:2px; }
+  .counter{ font-size:var(--body); padding:2px 5px; }
+
+  .canvas{ position:relative; flex:1; min-height:0; background:var(--paper); }
+  .page-svg{ width:100%; height:100%; display:block; }
+  .rule{ stroke:var(--muted); stroke-width:1; }
+  .ink-stroke{ stroke:var(--ink); stroke-width:1.8; fill:none; stroke-linecap:round; stroke-linejoin:round; }
+  .link-box{ fill:none; stroke:var(--ink); stroke-width:1.5; }
+  .link-label{ fill:var(--ink); font-family:inherit; font-size:12px; }
+
+  /* ---- generic anchored panel ---- */
+  .panel{ position:absolute; background:var(--paper); border:1.5px solid var(--ink); z-index:5; }
+
+  /* ================= LINKS MINI MAP ================= */
+
+  .map-panel{
+    top:8px; right:8px; width:70%;
+    display:flex; flex-direction:column;
+  }
+  .map-panel.closed{ display:none; }
+  .map-panel.fullframe{ top:0; right:0; left:0; bottom:0; width:auto; }
+
+  .map-header{
+    display:flex; align-items:center; gap:6px;
+    padding:6px 8px;
+    border-bottom:1px solid var(--ink);
+    font-size:11px;
+  }
+  .map-label{ color:var(--muted); margin-right:auto; }
+  .expand-btn{ margin-left:8px; }
+
+  .map-body{
+    position:relative;
+    width:100%;
+    aspect-ratio:1/1;
+    overflow:hidden;
+  }
+  .map-panel.fullframe .map-body{ flex:1 1 auto; aspect-ratio:auto; min-height:0; }
+
+  .map-edges{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .edge{ fill:none; stroke:var(--ink); stroke-width:1.5; }
+  .edge.dashed{ stroke-dasharray:3 2; }
+
+  /* Label chips: undirected graph, one hop deep, so every node needs a name
+     the reader can act on rather than a bare dot. */
+  .map-node{
+    position:absolute; transform:translate(-50%, -50%);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:2px;
+    min-height:44px; max-width:140px;
+    padding:6px 10px;
+    background:var(--paper); border:1.5px solid var(--ink);
+    cursor:pointer; text-align:center;
+    font-family:inherit; font-size:12px; font-weight:500; line-height:1.25;
+    white-space:normal; overflow-wrap:break-word;
+  }
+  .map-node:focus-visible{ outline:2px solid var(--ink); outline-offset:2px; }
+  .map-node.node-root{ background:var(--ink); border-color:var(--ink); color:var(--paper); }
+  .map-node.node-cross{ border-style:dashed; }
+  .map-node.selected{ border-width:3px; }
+  .map-node.node-root.selected{ box-shadow:inset 0 0 0 3px var(--paper); }
+  .node-title{ color:inherit; }
+  .node-meta{ font-size:10px; font-weight:400; color:var(--muted); }
+
+  .map-footer{
+    display:none;
+    align-items:center; gap:14px;
+    border-top:1px solid var(--ink);
+    padding:8px;
+    font-size:var(--caption);
+  }
+  .map-footer.show{ display:flex; }
+  .footer-info{ margin-right:auto; }
+
+  .caption-list{
+    list-style:none; margin:24px auto 0; padding:0;
+    max-width:620px;
+    display:flex; flex-direction:column; gap:4px;
+  }
+  .caption-list li{ font-size:12px; color:var(--muted); }
+</style>
+
+<div class="wrap">
+  <header class="page">
+    <h1>Links mini map</h1>
+    <p>Pages as nodes, connected by their links — a fixed graph opened from the editor bar.</p>
+  </header>
+
+  <div class="device-frame">
+    <div class="editor">
+      <div class="bar">
+        <div class="bar-group left">
+          <span class="bx">[≡]</span>
+          <span class="bx">[✎ pen]</span>
+          <span class="counter" id="pageCounter">#12 of 40</span>
+        </div>
+        <span class="bar-filler">·····</span>
+        <div class="bar-group right">
+          <button type="button" class="bx active" id="mapToggle" aria-pressed="true" aria-label="Links mini map">[⋈]</button>
+          <span class="bx">[⌕]</span>
+          <span class="bx">[⋯]</span>
+        </div>
+      </div>
+
+      <div class="canvas">
+        <svg class="page-svg" viewBox="0 0 400 520" preserveAspectRatio="none">
+          <line class="rule" x1="24" y1="40" x2="376" y2="40"/>
+          <line class="rule" x1="24" y1="70" x2="376" y2="70"/>
+          <line class="rule" x1="24" y1="100" x2="376" y2="100"/>
+          <line class="rule" x1="24" y1="130" x2="376" y2="130"/>
+          <line class="rule" x1="24" y1="160" x2="376" y2="160"/>
+          <line class="rule" x1="24" y1="190" x2="376" y2="190"/>
+          <line class="rule" x1="24" y1="220" x2="376" y2="220"/>
+          <line class="rule" x1="24" y1="250" x2="376" y2="250"/>
+          <line class="rule" x1="24" y1="280" x2="376" y2="280"/>
+          <line class="rule" x1="24" y1="380" x2="376" y2="380"/>
+          <line class="rule" x1="24" y1="410" x2="376" y2="410"/>
+          <line class="rule" x1="24" y1="440" x2="376" y2="440"/>
+          <line class="rule" x1="24" y1="470" x2="376" y2="470"/>
+          <path class="ink-stroke" d="M40,64 q8,-16 16,-2 q8,14 16,-4 q6,-12 14,0 q6,10 12,-2"/>
+          <path class="ink-stroke" d="M112,62 q10,-14 18,0 q8,12 16,-4 q8,-10 14,2"/>
+          <path class="ink-stroke" d="M40,94 q10,-14 18,-2 q8,12 16,-2 q6,-10 12,0 q8,10 16,-4 q6,-8 12,2"/>
+          <path class="ink-stroke" d="M162,92 q8,-12 16,0 q6,10 14,-2"/>
+          <path class="ink-stroke" d="M40,124 q8,-12 16,0 q10,12 18,-4 q6,-10 12,2"/>
+          <rect class="link-box" x="40" y="312" width="150" height="40"/>
+          <text class="link-label" x="115" y="337" text-anchor="middle">→ #14</text>
+        </svg>
+
+        <div class="panel map-panel" id="mapPanel">
+          <div class="map-header">
+            <span class="map-label">Map</span>
+            <button type="button" class="bx expand-btn" id="expandBtn" aria-label="Expand map">[⤢]</button>
+          </div>
+          <div class="map-body" id="mapBody">
+            <svg class="map-edges" id="mapEdges" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+            <div id="mapNodes"></div>
+          </div>
+          <div class="map-footer" id="mapFooter"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <ul class="caption-list">
+    <li>Radial layout, recomputed per root: current page in the centre, its neighbours spaced evenly around it.</li>
+    <li>No motion: recentring redraws the layout instantly, it never animates.</li>
+    <li>Links are shown without direction, one hop from the current page — no depth control.</li>
+    <li>Tap a chip to select it; [Open] or [Centre] then act on the selection.</li>
+    <li>[⤢] expands the map to fill the page, for a larger view.</li>
+  </ul>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var CURRENT_TOTAL = 40;
+  var RESEARCH_TOTAL = 12;
+
+  // Chip half-extents (px), matched to the CSS max-width/min-height below,
+  // so radial positions can be clamped to keep chip edges inside the map.
+  var CHIP_HALF_W = 70;
+  var CHIP_HALF_H = 22;
+
+  // Radius of the neighbour circle, as a percent of the (square) map body.
+  var RADIUS_PCT = 34;
+
+  var NODES = {
+    "12": { notebook:"current",  num:12, title:"Trip budget" },
+    "7":  { notebook:"current",  num:7,  title:"Flights" },
+    "9":  { notebook:"current",  num:9,  title:"Packing list" },
+    "14": { notebook:"current",  num:14, title:"Lisbon ideas" },
+    "15": { notebook:"current",  num:15, title:"Visa docs" },
+    "21": { notebook:"current",  num:21, title:"Day 1 plan" },
+    "3":  { notebook:"current",  num:3,  title:"Currency notes" },
+    "5":  { notebook:"current",  num:5,  title:"SIM & roaming" },
+    "11": { notebook:"current",  num:11, title:"Hostel shortlist" },
+    "26": { notebook:"current",  num:26, title:"Restaurant picks" },
+    "19": { notebook:"current",  num:19, title:"Metro map" },
+    "23": { notebook:"current",  num:23, title:"Photo spots" },
+    "31": { notebook:"current",  num:31, title:"Return flight" },
+    "17": { notebook:"current",  num:17, title:"Weather check" },
+    "r3": { notebook:"research", num:3,  title:"Tram routes" },
+    "r8": { notebook:"research", num:8,  title:"City history" },
+    "r2": { notebook:"research", num:2,  title:"Museum hours" }
+  };
+
+  var EDGES = [
+    { a:"12", b:"7"  },
+    { a:"9",  b:"12" },
+    { a:"12", b:"14" },
+    { a:"15", b:"12" },
+    { a:"12", b:"21" },
+    { a:"7",  b:"3"  },
+    { a:"7",  b:"5"  },
+    { a:"9",  b:"11" },
+    { a:"14", b:"r3", cross:true },
+    { a:"26", b:"14" },
+    { a:"15", b:"19" },
+    { a:"23", b:"15" },
+    { a:"21", b:"31" },
+    { a:"r8", b:"21" },
+    { a:"23", b:"17" },
+    { a:"r3", b:"r2" }
+  ];
+
+  var ADJ = {};
+  Object.keys(NODES).forEach(function(id){ ADJ[id] = []; });
+  EDGES.forEach(function(e){ ADJ[e.a].push(e.b); ADJ[e.b].push(e.a); });
+
+  function nodeLabel(id){
+    var n = NODES[id];
+    return (n.notebook === "research" ? "research #" : "#") + n.num;
+  }
+
+  // -- state --
+  var rootId = "12";
+  var rootStack = ["12"];
+  var selectedId = null;
+  var mapOpen = true;
+  var fullframe = false;
+
+  var pageCounterEl = document.getElementById("pageCounter");
+  var mapToggleEl = document.getElementById("mapToggle");
+  var mapPanelEl = document.getElementById("mapPanel");
+  var mapBodyEl = document.getElementById("mapBody");
+  var mapEdgesEl = document.getElementById("mapEdges");
+  var mapNodesEl = document.getElementById("mapNodes");
+  var mapFooterEl = document.getElementById("mapFooter");
+  var expandBtn = document.getElementById("expandBtn");
+
+  // Neighbours of `root`, ordered for the radial layout: same-notebook first
+  // by ascending page number, cross-notebook neighbours last, also by number.
+  function orderedNeighbours(root){
+    var rootNotebook = NODES[root].notebook;
+    var list = ADJ[root].slice();
+    list.sort(function(a, b){
+      var A = NODES[a], B = NODES[b];
+      var aCross = A.notebook === rootNotebook ? 0 : 1;
+      var bCross = B.notebook === rootNotebook ? 0 : 1;
+      if(aCross !== bCross) return aCross - bCross;
+      return A.num - B.num;
+    });
+    return list;
+  }
+
+  // Radial layout computed fresh for whichever page is root: root at centre,
+  // neighbours spaced evenly on a circle starting at 12 o'clock, going
+  // clockwise. Positions are clamped so a chip's edges never leave the map.
+  function layoutPositions(root){
+    var neighbours = orderedNeighbours(root);
+    var n = neighbours.length;
+    var rect = mapBodyEl.getBoundingClientRect();
+    var w = rect.width || 320, h = rect.height || 320;
+    var halfWpct = (CHIP_HALF_W / w) * 100;
+    var halfHpct = (CHIP_HALF_H / h) * 100;
+
+    function clamp(v, half){
+      var lo = half, hi = 100 - half;
+      if(lo >= hi) return 50;
+      return Math.min(hi, Math.max(lo, v));
+    }
+
+    var pos = {};
+    pos[root] = { x: clamp(50, halfWpct), y: clamp(50, halfHpct) };
+    neighbours.forEach(function(id, i){
+      var angle = (-90 + (360 * i / n)) * Math.PI / 180;
+      var x = 50 + RADIUS_PCT * Math.cos(angle);
+      var y = 50 + RADIUS_PCT * Math.sin(angle);
+      pos[id] = { x: clamp(x, halfWpct), y: clamp(y, halfHpct) };
+    });
+    return { neighbours: neighbours, pos: pos };
+  }
+
+  function renderMap(){
+    var root = NODES[rootId];
+    var layout = layoutPositions(rootId);
+    var pos = layout.pos;
+    var visibleIds = [rootId].concat(layout.neighbours);
+    var visibleSet = {};
+    visibleIds.forEach(function(id){ visibleSet[id] = true; });
+
+    // edges — plain undirected ink lines, dashed where they cross notebooks
+    mapEdgesEl.innerHTML = "";
+    EDGES.forEach(function(e){
+      if(!visibleSet[e.a] || !visibleSet[e.b]) return;
+      var A = pos[e.a], B = pos[e.b];
+      var line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("x1", A.x); line.setAttribute("y1", A.y);
+      line.setAttribute("x2", B.x); line.setAttribute("y2", B.y);
+      line.setAttribute("class", "edge" + (e.cross ? " dashed" : ""));
+      line.setAttribute("vector-effect", "non-scaling-stroke");
+      mapEdgesEl.appendChild(line);
+    });
+
+    // nodes — label chips, drawn over the edges; root filled solid black,
+    // neighbours outlined, cross-notebook neighbours dashed
+    mapNodesEl.innerHTML = "";
+    visibleIds.forEach(function(id){
+      var node = NODES[id];
+      var isRoot = id === rootId;
+      var isCross = node.notebook !== root.notebook;
+      var isSelected = id === selectedId;
+
+      var cls = "map-node " + (isRoot ? "node-root" : "node-neighbour");
+      if(isCross) cls += " node-cross";
+      if(isSelected) cls += " selected";
+
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = cls;
+      btn.style.left = pos[id].x + "%";
+      btn.style.top = pos[id].y + "%";
+      btn.dataset.id = id;
+
+      var html = '<span class="node-title">#' + node.num + " " + node.title + '</span>';
+      if(!isRoot){
+        var linkCount = ADJ[id].length;
+        var meta = (isCross ? "research · " : "") + linkCount + " link" + (linkCount === 1 ? "" : "s");
+        html += '<span class="node-meta">' + meta + '</span>';
+      }
+      btn.innerHTML = html;
+      btn.setAttribute("aria-label", nodeLabel(id) + " " + node.title + (isRoot ? " (current)" : ""));
+      btn.addEventListener("click", function(ev){ ev.stopPropagation(); selectedId = id; renderMap(); });
+      mapNodesEl.appendChild(btn);
+    });
+
+    renderFooter();
+  }
+
+  function renderFooter(){
+    var html = "";
+    if(selectedId){
+      html += '<span class="footer-info">' + nodeLabel(selectedId) + " " + NODES[selectedId].title + "</span>";
+      html += '<button type="button" class="bx" id="openBtn">[Open]</button>';
+      html += '<button type="button" class="bx" id="centreBtn">[Centre]</button>';
+    }
+    if(rootStack.length > 1){
+      html += '<button type="button" class="bx" id="backBtn">[‹ back]</button>';
+    }
+    mapFooterEl.innerHTML = html;
+    mapFooterEl.classList.toggle("show", html.length > 0);
+
+    var openBtn = document.getElementById("openBtn");
+    if(openBtn) openBtn.addEventListener("click", onOpen);
+    var centreBtn = document.getElementById("centreBtn");
+    if(centreBtn) centreBtn.addEventListener("click", onCentre);
+    var backBtn = document.getElementById("backBtn");
+    if(backBtn) backBtn.addEventListener("click", onBack);
+  }
+
+  function onCentre(){
+    if(!selectedId) return;
+    rootId = selectedId;
+    rootStack.push(rootId);
+    selectedId = null;
+    renderMap();
+  }
+
+  function onBack(){
+    if(rootStack.length > 1){
+      rootStack.pop();
+      rootId = rootStack[rootStack.length - 1];
+    }
+    selectedId = null;
+    renderMap();
+  }
+
+  function onOpen(){
+    if(!selectedId) return;
+    var node = NODES[selectedId];
+    var total = node.notebook === "research" ? RESEARCH_TOTAL : CURRENT_TOTAL;
+    pageCounterEl.textContent = nodeLabel(selectedId) + " of " + total;
+    rootId = selectedId;
+    rootStack = [rootId];
+    selectedId = null;
+    setMapOpen(false);
+    renderMap();
+  }
+
+  function setMapOpen(open){
+    mapOpen = open;
+    mapPanelEl.classList.toggle("closed", !open);
+    mapToggleEl.classList.toggle("active", open);
+    mapToggleEl.setAttribute("aria-pressed", String(open));
+  }
+
+  function setFullframe(v){
+    fullframe = v;
+    mapPanelEl.classList.toggle("fullframe", v);
+    expandBtn.textContent = v ? "[⤡]" : "[⤢]";
+    expandBtn.setAttribute("aria-label", v ? "Collapse map" : "Expand map");
+  }
+
+  mapToggleEl.addEventListener("click", function(){ setMapOpen(!mapOpen); });
+  expandBtn.addEventListener("click", function(){ setFullframe(!fullframe); });
+  mapBodyEl.addEventListener("click", function(){ selectedId = null; renderMap(); });
+
+  renderMap();
+})();
+</script>

@@ -155,7 +155,7 @@ class PageRenderer(private val imageResolver: ImageResolver? = null) {
         }
         // Affordances go on top of every layer, and only while the main layer that carries the
         // circled handwriting is showing — hide that layer and its buttons go with it.
-        if (mainLayerVisible) linkRenderer.draw(canvas, links)
+        if (mainLayerVisible) linkRenderer.draw(canvas, links, width.toFloat(), height.toFloat())
     }
 
     private fun dropCachesForRemovedLayers(page: Page) {

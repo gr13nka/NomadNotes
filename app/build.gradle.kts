@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -48,6 +49,12 @@ dependencies {
     implementation(project(":pen-onyx"))
 
     implementation(libs.androidx.core.ktx)
+
+    // NotebookStorage.loadLinkIndex decodes a slim per-page JSON (id + links, no strokes) for the
+    // links map. :core already depends on this to read/write the real Page/Notebook format, but as
+    // `implementation`, which does not propagate here — :app needs its own copy of the dependency
+    // (and the compiler plugin, above) to declare and decode that slim shape itself.
+    implementation(libs.kotlinx.serialization.json)
 
     // Background storage I/O and autosave run on coroutines launched from the Activity's
     // lifecycleScope (lifecycle-runtime-ktx).

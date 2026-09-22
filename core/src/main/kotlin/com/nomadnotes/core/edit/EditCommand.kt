@@ -4,6 +4,7 @@ import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.Layer
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.LinkId
+import com.nomadnotes.core.LinkSticker
 import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
@@ -183,6 +184,21 @@ internal class SetLinkTarget(
             page.copy(links = links),
             SetLinkTarget(id, link.targetNotebookId, link.targetPageId),
         )
+    }
+}
+
+/** Sets a link's sticker; self-inverse, capturing the prior sticker (which may be null). */
+internal class SetLinkSticker(
+    private val id: LinkId,
+    private val sticker: LinkSticker?,
+) : EditCommand {
+    override fun applyTo(page: Page): Applied {
+        val link = requireNotNull(page.links.firstOrNull { it.id == id }) {
+            "No link $id on page ${page.id}"
+        }
+        val updated = link.copy(sticker = sticker)
+        val links = page.links.map { if (it.id == id) updated else it }
+        return Applied(page.copy(links = links), SetLinkSticker(id, link.sticker))
     }
 }
 

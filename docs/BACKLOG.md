@@ -176,6 +176,19 @@ only after the mockups are approved.
    renderer that caches on save.
 4. **Quick Find.** A name-only index (notebooks, Recent pages), plus a backlinks query over
    `PageLink`. The heading search waits for Phase 3.
+5. **Resolved: links mini map.** The `[⋈]` panel (design §4, mockups
+   `2026-09-22-links-minimap-mockups.html`) is built: `EditorChromeContracts.kt`'s
+   `LinksMapPanelState`/`LinksMapPanelActions`, `editor/LinksMapController.kt`,
+   `ui/editor/LinksMapPanel.kt`, and `NotebookStorage.loadLinkIndex`. One hop, tap-to-select-then-act,
+   `[open]`/`[centre]`/`[‹ back]`; no depth control (the design dropped it — the view is always
+   exactly one hop). Not built: the `[⤢]` full-frame toggle (item 6 below).
+6. **Links map: full-frame toggle.** `[⤢]` in the map header, to expand the anchored panel (item 5)
+   to fill the whole page area below the bar for a larger view; `[⤡]` returns it. Design §4 marks
+   this deferred.
+7. **Resolved: sticker ink latency.** The sticker panel first captured the pen as ordinary touch and
+   lagged on the Boox. It now uses Onyx raw drawing over the full surface with everything around the
+   drawing box excluded (`PenBackend.setCaptureRegion`), and the link picker shows page previews
+   (`render/PageThumbnails.kt`). Confirmed working on the Go 10.3 on 2026-09-22.
 
 ## Accepted deferrals (from Phase 2 reviews)
 

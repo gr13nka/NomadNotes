@@ -45,6 +45,20 @@ interface PenBackend {
     fun setExcludeRects(rects: List<Rect>)
 
     /**
+     * Restricts pen capture to [rect] (surface-local pixels), replacing the ordinary full-surface
+     * region outright — unlike [setExcludeRects], which subtracts from that region, this is for a
+     * caller that wants to capture *into* one small area instead of the page. Returns true if the
+     * backend can do this natively, inking inside [rect] at the same hardware speed ordinary page
+     * strokes get; false if it cannot, in which case nothing changes and the caller must fall back
+     * to some capture path of its own. `null` restores the ordinary full-surface region (with
+     * [setExcludeRects]'s excludes back in effect).
+     *
+     * Currently only the sticker panel's drawing box uses this, so its ink is lag-free like the main
+     * canvas instead of riding Compose's touch dispatch (see `EditorActivity`'s sticker-flow handling).
+     */
+    fun setCaptureRegion(rect: Rect?): Boolean
+
+    /**
      * How the next finished gesture is captured and reported (see [CaptureMode]). In [CaptureMode.INK]
      * the backend shows wet ink and reports a stroke; in [CaptureMode.ERASE]/[CaptureMode.LASSO] it
      * shows none and reports the gesture for erasing or lasso selection.

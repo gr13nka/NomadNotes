@@ -64,6 +64,15 @@ class OnyxPenBackend(
     private var widthBase = 0f
     private var grayLevel = MAX_GRAY_LEVEL
 
+    // The full-surface rect passed to openRawDrawing at attach time, remembered so setCaptureRegion
+    // can restore it once a restricted region is released.
+    private var fullSurfaceRect = Rect()
+
+    // The caller's restricted capture rect (see setCaptureRegion), or null for ordinary full-surface
+    // capture. While set, the controller excludes everything around it (surroundingRects) in place
+    // of the chrome [excludeRects], which are only recorded until the region is released.
+    private var captureRegion: Rect? = null
+
     // Whether raw drawing is currently resumed. Tracked here so the persist-blit that must precede a
     // resume→pause happens on exactly that edge (see [reconcile]), and whether the lasso touch
     // listener is currently attached, so it is set/cleared only on change.
@@ -177,7 +186,8 @@ class OnyxPenBackend(
         // Clean the surface with the committed page FIRST, then open raw drawing, then bring capture
         // (raw drawing or the lasso touch listener) up per the current mode.
         controller.renderToScreen(currentComposite())
-        controller.openRawDrawing(Rect(0, 0, surfaceView.width, surfaceView.height), excludeRects)
+        fullSurfaceRect = Rect(0, 0, surfaceView.width, surfaceView.height)
+        controller.openRawDrawing(fullSurfaceRect, excludeRects)
         surfaceView.setOnTouchListener { _, event ->
             if (!enabled) return@setOnTouchListener false
             // All four see every event: during a two-finger-hold lasso the pen and the resting
@@ -262,8 +272,25 @@ class OnyxPenBackend(
 
     override fun setExcludeRects(rects: List<Rect>) {
         excludeRects = rects.toList()
+        // While a capture region is active the controller's excludes are the rects around it (see
+        // [captureRegion]'s doc); forwarding chrome rects would replace those, and a chrome rect that
+        // contains the region would exclude it entirely. Recording them above is enough:
+        // setCaptureRegion(null) applies the latest excludeRects when the region is released.
+        if (captureRegion != null) return
         controller?.setExcludeRects(excludeRects)
         lassoCollector.setExcludeRects(excludeRects)
+    }
+
+    override fun setCaptureRegion(rect: Rect?): Boolean {
+        if (captureRegion == rect) return true
+        captureRegion = rect
+        // A limitRect smaller than the surface delivers no strokes at all on the Go 10.3 firmware, so
+        // the region is expressed the way ordinary capture already works: the full surface as the
+        // limit, with everything around the region excluded. Releasing it restores the chrome excludes.
+        val excludes = if (rect != null) surroundingRects(rect, fullSurfaceRect) else excludeRects
+        controller?.setLimitRect(fullSurfaceRect, excludes)
+        Log.d(GTAG, "setCaptureRegion rect=$rect engaged=${rect != null}")
+        return true
     }
 
     override fun setStrokeAppearance(tool: Tool, widthBase: Float, grayLevel: Int) {
@@ -365,3 +392,14 @@ class OnyxPenBackend(
         fun prepareProcess() = OnyxHiddenApi.exemptOnyxSystemClasses()
     }
 }
+
+/**
+ * The up-to-four rects of [surface] around [region] (above, below, left, right), so excluding them
+ * leaves only [region] capturing. Empty strips are dropped.
+ */
+internal fun surroundingRects(region: Rect, surface: Rect): List<Rect> = listOf(
+    Rect(surface.left, surface.top, surface.right, region.top),
+    Rect(surface.left, region.bottom, surface.right, surface.bottom),
+    Rect(surface.left, region.top, region.left, region.bottom),
+    Rect(region.right, region.top, surface.right, region.bottom),
+).filter { it.width() > 0 && it.height() > 0 }

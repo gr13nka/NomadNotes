@@ -302,6 +302,59 @@ Search as navigation. Typing a place's name takes you there (T3 §4, "Type Trave
   into.
 - **Out of scope**: handwriting recognition. Find never pretends to search ink.
 
+## 4. Links mini map
+
+Mockups: `2026-09-22-links-minimap-mockups.html` (same folder). **Built** — the anchored panel
+below; the full-frame toggle is not (see that bullet).
+
+Pages as named chips, connected by their `PageLink`s. It's a map to get oriented in, one hop at a
+time, not a reading view.
+
+Pages have no titles, so a chip's name is not free text like the mockup's placeholder `Trip
+budget` — it is the handwritten **sticker** on the `PageLink` between the chip and its neighbour,
+scaled down to a small bitmap; a link with no sticker falls back to `#N`. The centre chip borrows
+the first sticker among its own outgoing links, for the same reason.
+
+**Sticker flow** (feeds the chips above). Creating a link no longer stops at picking the target
+page: a small 2:1 panel opens next, pen-only, to write or draw the sticker — `[Done]` attaches it,
+`[Skip]` attaches none. The circled-link selection bar gains a matching `[sticker]` verb to redraw
+an existing link's sticker later. The sticker is drawn on the link's own card on the source page
+too, doubling as its caption there.
+
+- **Entry point.** A `[⋈]` bar glyph, left of `[⌕]`. It opens a panel anchored under it, following
+  the Panel mechanics above (16 dp edge clamp, no scrim, raw drawing off while open, closes on an
+  outside tap or a pen touch). Open by default about 70 % of the screen wide and roughly square, in
+  the top-right under the glyph.
+- **Radial layout, one hop deep.** Only the current page and its direct neighbours are drawn —
+  nothing further out. The current page sits at the centre; its neighbours are placed evenly on a
+  circle around it, starting at 12 o'clock and going clockwise, ordered by page number with
+  cross-notebook neighbours last. The layout is recomputed from scratch for whichever page is
+  root, not force-directed and not animated — e-ink has no budget for a physics simulation, and
+  recentring is a single redraw.
+- **Named chips, not dots.** Every node is a label chip, not a bare mark, so the map reads without
+  guessing: the current page is a solid black chip with white text when it has no sticker, `#12`,
+  or its sticker bitmap (3 dp border) when it does; neighbours are white chips with a 1.5 px ink
+  border, their sticker bitmap or `#7` when they have none, with a second muted line giving their
+  own link count (`3 links`) so it's clear centring on them leads somewhere. A cross-notebook
+  neighbour gets a dashed border and folds its notebook into that line: `research #2 · 2 links`.
+  Every chip's hit area is a comfortable ≥48 dp tall.
+- **Undirected edges.** Edges are plain 1.5 px ink lines connecting chip centres, drawn under the
+  chips — no arrowheads, since a link has no reading direction here. A cross-notebook edge is
+  dashed.
+- **Tap-to-select-then-act.** A tap selects a chip — a thicker 3 px border (or, on the solid
+  current-page chip, an inverted white ring) — and fills a footer row with `#N Title`, `[Open]`,
+  `[Centre]`. With only one hop shown there's nothing else to fade. A stray tap does no harm;
+  tapping empty map space clears the selection.
+- **Centre re-anchors, it doesn't navigate.** `[Centre]` makes the selected node the new "current"
+  page and recomputes the radial layout around it instantly — no depth control needed, since the
+  view is always exactly one hop deep. The bar's page counter does not change. The footer grows a
+  `[‹ back]` once the map has been re-centred, to undo it.
+- **Full-frame toggle — deferred.** `[⤢]` in the header, to expand the panel to fill the whole page
+  area below the bar, is not built in v1 (`docs/BACKLOG.md`); the map is always the anchored panel.
+- **Open** commits the jump: it closes the panel and updates the bar's page counter to the selected
+  page, the same as any other navigation. `[⋈]` reopens the map, now centred on the page you're on.
+- **Empty state.** The current page alone, captioned `no links yet`.
+
 ## Implementation touchpoints (for the follow-up round)
 
 - `app/src/main/java/com/nomadnotes/app/ui/Eink.kt`: tokens, `Typography`, and the Geist

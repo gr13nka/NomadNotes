@@ -14,10 +14,13 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +28,8 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -33,13 +38,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect as ComposeRect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -47,23 +56,32 @@ import androidx.lifecycle.lifecycleScope
 import com.nomadnotes.R
 import com.nomadnotes.app.editor.ImageGrip
 import com.nomadnotes.app.editor.ImagePlacement
+import com.nomadnotes.app.editor.LinksMapController
 import com.nomadnotes.app.editor.SelectionBounds
 import com.nomadnotes.app.editor.SelectionState
+import com.nomadnotes.app.editor.StickerDraft
+import com.nomadnotes.app.editor.StickerFlowMode
+import com.nomadnotes.app.editor.StickerFlowState
 import com.nomadnotes.app.editor.TapClassifier
+import com.nomadnotes.app.editor.surfaceToStickerSpace
 import com.nomadnotes.app.input.AndroidPenBackend
 import com.nomadnotes.app.input.CaptureMode
 import com.nomadnotes.app.input.OnyxPenBackend
 import com.nomadnotes.app.input.PenBackend
 import com.nomadnotes.app.render.ImageResolver
 import com.nomadnotes.app.render.PageRenderer
+import com.nomadnotes.app.render.PageThumbnailCache
 import com.nomadnotes.app.render.SelectionRenderer
 import com.nomadnotes.app.render.StrokeRenderer
 import com.nomadnotes.app.render.TemplateResolver
 import com.nomadnotes.app.storage.EditorPrefs
 import com.nomadnotes.app.storage.NotebookStorage
 import com.nomadnotes.app.storage.notebooksRoot
+import com.nomadnotes.app.ui.BorderWidth
 import com.nomadnotes.app.ui.ConfirmDialog
+import com.nomadnotes.app.ui.EinkBlack
 import com.nomadnotes.app.ui.EinkBracket
+import com.nomadnotes.app.ui.EinkMuted
 import com.nomadnotes.app.ui.EinkSpacing
 import com.nomadnotes.app.ui.EinkTheme
 import com.nomadnotes.app.ui.EinkTypography
@@ -74,12 +92,18 @@ import com.nomadnotes.app.ui.editor.EditorBarActions
 import com.nomadnotes.app.ui.editor.EditorBarState
 import com.nomadnotes.app.ui.editor.EditorPanel
 import com.nomadnotes.app.ui.editor.EditorTool
+import com.nomadnotes.app.ui.editor.LinksMapPanel
+import com.nomadnotes.app.ui.editor.LinksMapPanelActions
+import com.nomadnotes.app.ui.editor.LinksMapPanelState
 import com.nomadnotes.app.ui.editor.MorePanel
 import com.nomadnotes.app.ui.editor.MorePanelActions
 import com.nomadnotes.app.ui.editor.MorePanelState
 import com.nomadnotes.app.ui.editor.PagePanel
 import com.nomadnotes.app.ui.editor.PagePanelActions
 import com.nomadnotes.app.ui.editor.PagePanelState
+import com.nomadnotes.app.ui.editor.StickerPanel
+import com.nomadnotes.app.ui.editor.StickerPanelActions
+import com.nomadnotes.app.ui.editor.StickerPanelState
 import com.nomadnotes.app.ui.editor.ToolPanel
 import com.nomadnotes.app.ui.editor.ToolPanelActions
 import com.nomadnotes.app.ui.editor.ToolPanelState
@@ -87,11 +111,15 @@ import com.nomadnotes.app.ui.editor.asCoreTool
 import com.nomadnotes.core.ImageId
 import com.nomadnotes.core.LayerId
 import com.nomadnotes.core.LinkId
+import com.nomadnotes.core.LinkSticker
 import com.nomadnotes.core.Notebook
+import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
 import com.nomadnotes.core.PageImage
 import com.nomadnotes.core.PageLink
+import com.nomadnotes.core.links.NodeRef
+import com.nomadnotes.core.links.StickerPlacement
 import com.nomadnotes.core.recent.lastPageOf
 import com.nomadnotes.core.PageRect
 import com.nomadnotes.core.Stroke
@@ -173,6 +201,15 @@ private data class JumpOrigin(val notebookName: String, val pageId: PageId, val 
 private val ScrimColor = Color(0x33000000)
 
 /**
+ * The link picker's thumbnail cell size — wider than PagePanel's own paging-strip cell (32 dp)
+ * since here the grid is the picker's primary content, not a compact strip. Aspect mirrors
+ * `PagePanel.PageThumbCell`'s own 400:520 page shape (that file's `PageAspectRatio`); duplicated
+ * rather than shared because that constant is private to `PagePanel.kt`.
+ */
+private val LinkPickerThumbWidth = 88.dp
+private const val LinkPickerThumbAspect = 400f / 520f
+
+/**
  * The notebook editor: a full page-editing surface with a Compose toolbar, layers panel, template
  * picker, and page navigation.
  *
@@ -196,12 +233,18 @@ internal class EditorActivity :
     EditorBarActions,
     ToolPanelActions,
     PagePanelActions,
-    MorePanelActions {
+    MorePanelActions,
+    StickerPanelActions,
+    LinksMapPanelActions {
 
     private lateinit var surfaceView: SurfaceView
     private lateinit var storage: NotebookStorage
     private lateinit var templateResolver: TemplateResolver
     private lateinit var prefs: EditorPrefs
+
+    // Renders and caches the link picker's page-grid thumbnails off the main thread; outlives any
+    // one picker visit so reopening it or scrolling back to an already-rendered page costs nothing.
+    private lateinit var thumbnailCache: PageThumbnailCache
 
     // Decodes placed images on demand. Reads the notebook through a lambda rather than holding one,
     // so the same resolver keeps working as the editor follows a link into another notebook.
@@ -211,6 +254,11 @@ internal class EditorActivity :
 
     private val renderer = PageRenderer(imageResolver)
     private val selectionRenderer = SelectionRenderer()
+
+    // Owns the links map's own state (the loaded index, the centre stack, the selection, and its
+    // chip bitmap cache) across opens; this Activity only loads the index off the main thread and
+    // forwards actions — see LinksMapController's own doc.
+    private val linksMapController = LinksMapController()
 
     // Draws the selected strokes onto the live move-drag preview (the same ink path a committed
     // stroke takes through PageRenderer, so the previewed strokes look identical to the result).
@@ -328,6 +376,36 @@ internal class EditorActivity :
     private var uiClipboardHasContent by mutableStateOf(false)
     private var uiLinkPicker by mutableStateOf<LinkPickerState?>(null)
 
+    // The open sticker panel's flow (which link it is for, and the draft it is filling), or null
+    // when none is open. Suppresses pen capture exactly like uiLinkPicker (updateBackendEnabled) —
+    // it usually opens right after the picker closes, continuing the same suppressed-capture span.
+    private var uiStickerFlow by mutableStateOf<StickerFlowState?>(null)
+
+    // Bumped on every drawn point, finished stroke, clear, or native-capture-region change, so the
+    // sticker panel recomposes as the user draws or as capture hands off between the native path and
+    // the Compose fallback. StickerDraft and stickerCaptureRegionActive are plain fields, not Compose
+    // state — this is what tells Compose the live drawing it reads off `uiStickerFlow.draft`, and
+    // `stickerCaptureRegionActive` itself, are stale (see stickerPanelState).
+    private var uiStickerDraftTick by mutableStateOf(0)
+
+    // The sticker drawing box's own surface-local bounds while native raw-drawing capture is
+    // restricted to it (see updateStickerCaptureBox), or null before that first lands / once the
+    // flow closes. Plain fields, not Compose state: both are read only by imperative pen-input code
+    // (penListener, updateBackendEnabled), never by a composable.
+    private var stickerCaptureBox: Rect? = null
+
+    // Whether [PenBackend.setCaptureRegion] accepted the sticker box — native raw drawing is inking
+    // it directly, lag-free like the main canvas, instead of StickerPanel's own Compose pointerInput
+    // fallback. Gates updateBackendEnabled (native capture wants the backend ON but restricted to the
+    // box; the fallback wants it fully OFF so Compose is the only capture path) and which branch of
+    // penListener.onStrokeFinished a finished gesture routes through.
+    private var stickerCaptureRegionActive = false
+
+    // Bumped on every LinksMapController mutation (load, select, centre, back), the same role
+    // uiStickerDraftTick plays for StickerDraft: the controller is a plain class with no Compose
+    // state of its own, so this is what tells Compose linksMapPanelState()'s result is stale.
+    private var uiLinksMapTick by mutableStateOf(0)
+
     // Whether the bar is hidden down to a single "[≡]" ("Just the page"), persisted like [uiSmoothing].
     private var uiChromeHidden by mutableStateOf(false)
 
@@ -372,6 +450,7 @@ internal class EditorActivity :
         storage = NotebookStorage(root)
         templateResolver = TemplateResolver(storage.templatesDir)
         prefs = EditorPrefs(this)
+        thumbnailCache = PageThumbnailCache(storage)
         uiSmoothing = prefs.smoothing
         uiChromeHidden = prefs.chromeHidden
         surfaceView = SurfaceView(this)
@@ -630,14 +709,24 @@ internal class EditorActivity :
         }
 
         override fun onStrokeFinished(points: List<StrokePoint>) {
-            val session = session ?: return
             if (points.isEmpty()) return
-            // A tap on a link navigates instead of inking. Only in INK mode (ERASE/LASSO gestures
-            // arrive on other callbacks), and only for a real tap on a link region; anything else
-            // falls through to the ordinary ink path below unchanged.
-            if (backend.captureMode == CaptureMode.INK && TapClassifier.isTap(points)) {
-                val link = linkAt(session, points.first())
-                if (link != null) {
+            // A gesture the backend captured natively inside the sticker box arrives on this same
+            // callback (see routeStickerCaptureStroke) — it is never page ink, so intercept it before
+            // touching session/link/tool state at all.
+            if (stickerCaptureRegionActive) {
+                routeStickerCaptureStroke(points)
+                return
+            }
+            val session = session ?: return
+            // A tap that starts on a link navigates instead of inking, using TapClassifier.isLinkTap's
+            // more generous tolerance rather than the ordinary isTap — a real stylus tap on a small
+            // link routinely drifts and lingers past isTap's tight thresholds. Only in INK mode
+            // (ERASE/LASSO gestures arrive on other callbacks); anything not starting on a link falls
+            // through to the ordinary ink path below unchanged.
+            if (backend.captureMode == CaptureMode.INK) {
+                val first = points.first()
+                val link = linkAt(session, first.x, first.y)
+                if (link != null && TapClassifier.isLinkTap(points)) {
                     navigateToLink(link)
                     return
                 }
@@ -662,25 +751,78 @@ internal class EditorActivity :
             scheduleAutosave()
         }
 
-        override fun onEraseGesture(points: List<StrokePoint>) = eraseAlong(points)
+        // Native sticker capture has no eraser of its own ([clear] is its only reset), and no lasso —
+        // both would otherwise touch the page from underneath a modal that should be isolated from
+        // it. A side-button erase or a two-/three-finger gesture landing inside the restricted box is
+        // dropped rather than acted on; see the shared uiStickerFlow guard below on the intent
+        // gestures (undo/redo/lasso-arm/swipe/finger-tap), which reach the surface-wide touch
+        // listener that enabling the backend for native capture necessarily re-arms.
+        override fun onEraseGesture(points: List<StrokePoint>) {
+            if (uiStickerFlow != null) return
+            eraseAlong(points)
+        }
 
         override fun onLassoGesture(points: List<StrokePoint>) = endLassoGesture(points)
 
         override fun onLassoMove(point: StrokePoint) = previewLasso(point)
 
-        override fun onUndoGesture() = undoByGesture()
+        override fun onUndoGesture() {
+            if (uiStickerFlow != null) return
+            undoByGesture()
+        }
 
-        override fun onRedoGesture() = redoByGesture()
+        override fun onRedoGesture() {
+            if (uiStickerFlow != null) return
+            redoByGesture()
+        }
 
-        override fun onLassoArmed() = armLassoForNextStroke()
+        override fun onLassoArmed() {
+            if (uiStickerFlow != null) return
+            armLassoForNextStroke()
+        }
 
         // Reuse the Page panel's own prev/next exactly, so a swipe gets the same boundary no-op (no
         // page past the last, none before the first) and the same one-refresh chrome pause.
-        override fun onSwipeNextPage() = onNextPage()
+        override fun onSwipeNextPage() {
+            if (uiStickerFlow != null) return
+            onNextPage()
+        }
 
-        override fun onSwipePrevPage() = onPrevPage()
+        override fun onSwipePrevPage() {
+            if (uiStickerFlow != null) return
+            onPrevPage()
+        }
 
-        override fun onFingerTap(x: Float, y: Float) = onFingerTapAt(x, y)
+        override fun onFingerTap(x: Float, y: Float) {
+            if (uiStickerFlow != null) return
+            onFingerTapAt(x, y)
+        }
+    }
+
+    /**
+     * A gesture the backend captured natively inside the sticker box ([updateStickerCaptureBox])
+     * arrives on [penListener]'s ordinary drawing callback, since that backend has only the one.
+     * Maps it from surface pixels into the draft's fixed sticker-space coordinates and folds it in,
+     * then briefly pauses capture — the same [withChromeRefresh] dance any other chrome change gets
+     * — so the panel's own Compose repaint (now drawing this stroke from the draft, like every other
+     * committed one) reaches the screen and replaces the hardware's ephemeral wet ink.
+     */
+    private fun routeStickerCaptureStroke(points: List<StrokePoint>) {
+        val flow = uiStickerFlow ?: return
+        val box = stickerCaptureBox ?: return
+        val mapped = points.map { p ->
+            val (x, y) = surfaceToStickerSpace(
+                p.x, p.y, box.left.toFloat(), box.top.toFloat(), box.width().toFloat(), box.height().toFloat(),
+            )
+            p.copy(x = x, y = y)
+        }
+        // The points were scaled into sticker space, so the width must be too, or the saved stroke
+        // comes out thinner than the wet ink the user just saw.
+        val widthInStickerSpace = flow.draft.widthBase * (LinkSticker.WIDTH / box.width().toFloat())
+        flow.draft.addStroke(mapped, widthInStickerSpace)
+        // Deliberately no repaint: the panel's wet ink already shows this stroke exactly, and
+        // repainting per stroke pauses raw drawing (a visible blink) to redraw the same ink. As with
+        // page ink, the draft only needs to reach the screen when the panel itself changes.
     }
 
     /**
@@ -1001,12 +1143,18 @@ internal class EditorActivity :
      * (see [PenBackend.Listener.onFingerTap]). While a selection is showing, a tap outside it clears
      * it — the same outcome as the bar's `[×]` ([onDeselect]) — so poking at the page to look at
      * something else dismisses the selection instead of leaving it stranded until the next lasso or
-     * tool switch. A tap inside does nothing new, and a tap with nothing selected is a no-op.
+     * tool switch. A tap inside does nothing new. With nothing selected, a tap on a link (its region
+     * or sticker card) navigates instead — the finger counterpart of a stylus link tap
+     * ([penListener]'s `onStrokeFinished`), since a plain touch never reaches that pen-only path.
      */
     private fun onFingerTapAt(x: Float, y: Float) {
-        if (selection == null && uiCircledImage == null && uiCircledLink == null) return
-        if (insideSelectionAffordance(x, y)) return
-        withChromeRefresh { clearSelection() }
+        if (selection != null || uiCircledImage != null || uiCircledLink != null) {
+            if (!insideSelectionAffordance(x, y)) withChromeRefresh { clearSelection() }
+            return
+        }
+        val session = session ?: return
+        val link = linkAt(session, x, y) ?: return
+        navigateToLink(link)
     }
 
     /**
@@ -1267,22 +1415,31 @@ internal class EditorActivity :
         updateBackendEnabled()
     }
 
-    /** A page was chosen in the picker: act on it per the picker's mode, then close and repaint. */
+    /**
+     * A page was chosen in the picker: act on it per the picker's mode. A fresh link still needs
+     * its sticker, so [LinkPickerMode.Create] hands off to the sticker panel rather than adding the
+     * link itself ([openStickerFlow] closes the picker); retargeting an existing link touches
+     * nothing else, so [LinkPickerMode.EditTarget] still commits immediately.
+     */
     private fun confirmLinkTarget(picker: LinkPickerState, targetNotebook: Notebook, targetPageId: PageId) {
         when (val mode = picker.mode) {
-            is LinkPickerMode.Create -> createLink(mode.bounds, targetNotebook, targetPageId)
+            is LinkPickerMode.Create -> openStickerFlow(StickerFlowMode.Create(mode.bounds, targetNotebook, targetPageId))
             is LinkPickerMode.EditTarget -> retargetLink(mode.linkId, targetNotebook, targetPageId)
         }
     }
 
     /**
      * Attaches a link over the lassoed region ([bounds] padded outward) pointing at ([targetNotebook],
-     * [targetPageId]), then drops the selection and picker and repaints so the new affordance shows —
-     * the single-present tail of [deleteSelection] (null the state, then one [renderPage]), not a
-     * [clearSelection] that would blit a link-less frame first. Re-enables pen capture last, after the
-     * present, so raw drawing does not resume before the frame reaches the panel.
+     * [targetPageId]) with [sticker] (possibly null — Skip, or a Done on an empty draft), then drops
+     * the selection and sticker flow and repaints so the new affordance shows — the single-present
+     * tail of [deleteSelection] (null the state, then one [renderPage]), not a [clearSelection] that
+     * would blit a link-less frame first. Re-enables pen capture last, after the present, so raw
+     * drawing does not resume before the frame reaches the panel. The only caller is
+     * [commitStickerFlow], one step after the picker that gathered [bounds]/[targetNotebook]/
+     * [targetPageId] — see [confirmLinkTarget] — so a link with a sticker is still added in this one
+     * undoable step ([PageEditSession.addLink]).
      */
-    private fun createLink(bounds: SelectionBounds, targetNotebook: Notebook, targetPageId: PageId) {
+    private fun createLink(bounds: SelectionBounds, targetNotebook: Notebook, targetPageId: PageId, sticker: LinkSticker?) {
         val session = session ?: return
         val region = PageRect(
             left = bounds.left - LINK_REGION_PADDING_PX,
@@ -1290,10 +1447,10 @@ internal class EditorActivity :
             right = bounds.right + LINK_REGION_PADDING_PX,
             bottom = bounds.bottom + LINK_REGION_PADDING_PX,
         )
-        session.addLink(PageLink(LinkId.random(), region, targetNotebook.id, targetPageId))
+        session.addLink(PageLink(LinkId.random(), region, targetNotebook.id, targetPageId, sticker))
         selection = null
         selectionPolygon = null
-        uiLinkPicker = null
+        uiStickerFlow = null
         updateSelectionUi()
         refreshUndoRedo()
         renderPage()
@@ -1314,6 +1471,140 @@ internal class EditorActivity :
             return
         }
         openLinkPicker(LinkPickerMode.EditTarget(id))
+    }
+
+    /**
+     * Opens the sticker panel to replace the circled link's sticker — the same stale-id guard as
+     * [editCircledLink], since the circle can outlive the link it named.
+     */
+    private fun editCircledLinkSticker() {
+        val session = session ?: return
+        val id = uiCircledLink ?: return
+        if (session.page.links.none { it.id == id }) {
+            uiCircledLink = null
+            return
+        }
+        openStickerFlow(StickerFlowMode.Edit(id))
+    }
+
+    /**
+     * Shows the sticker panel for [mode], seeding its draft from the link's existing sticker for
+     * [StickerFlowMode.Edit] (empty for a still-unattached [StickerFlowMode.Create]) and suppressing
+     * pen capture for as long as it is open, exactly like the target picker it usually follows —
+     * closing the picker here continues that same suppressed-capture span rather than briefly
+     * re-enabling capture between the two.
+     */
+    private fun openStickerFlow(mode: StickerFlowMode) {
+        uiLinkPicker = null
+        val existingStrokes = when (mode) {
+            is StickerFlowMode.Create -> emptyList()
+            is StickerFlowMode.Edit -> session?.page?.links?.firstOrNull { it.id == mode.linkId }?.sticker?.strokes.orEmpty()
+        }
+        uiStickerFlow = StickerFlowState(mode, StickerDraft(uiTool, uiWidth.px, uiShade.level, existingStrokes))
+        // Native capture engages once the box's own bounds land (updateStickerCaptureBox); until then
+        // capture stays off, same as commitStickerFlow/cancelStickerFlow leave it on the way out.
+        stickerCaptureBox = null
+        stickerCaptureRegionActive = false
+        updateBackendEnabled()
+    }
+
+    /**
+     * Finishes the open sticker panel with [sticker] (null for Skip, or a Done on an empty draft):
+     * adds the pending link for a Create flow ([createLink]), or updates the existing link's sticker
+     * for an Edit flow. Both branches repaint and autosave, matching [createLink]'s own tail for the
+     * Edit case since it is not the one that already does so.
+     */
+    private fun commitStickerFlow(sticker: LinkSticker?) {
+        val flow = uiStickerFlow ?: return
+        // Restored before either branch's own updateBackendEnabled() call, so it decides capture
+        // on/off against the already-normal region/mode rather than the sticker box's.
+        closeStickerCapture()
+        when (val mode = flow.mode) {
+            is StickerFlowMode.Create -> createLink(mode.bounds, mode.targetNotebook, mode.targetPageId, sticker)
+            is StickerFlowMode.Edit -> {
+                session?.setLinkSticker(mode.linkId, sticker)
+                uiCircledLink = null
+                uiStickerFlow = null
+                refreshUndoRedo()
+                renderPage()
+                scheduleAutosave()
+                updateBackendEnabled()
+            }
+        }
+        updateChromeExclude(STICKER_RECT_KEY, null)
+    }
+
+    /**
+     * Dismisses the sticker panel with no change: no link at all for a cancelled Create (nothing was
+     * ever added to the page), and whatever sticker the link already had for a cancelled Edit.
+     * Mirrors [closeLinkPicker]'s own minimalism.
+     */
+    private fun cancelStickerFlow() {
+        uiStickerFlow = null
+        closeStickerCapture()
+        updateChromeExclude(STICKER_RECT_KEY, null)
+        updateBackendEnabled()
+    }
+
+    /**
+     * Restricts pen capture to the sticker box, or reports that this backend cannot — reported by
+     * [StickerPanel]'s own drawing-box bounds callback, distinct from the whole-panel bounds
+     * [updateStickerPanelExclude] handles. A stale callback from a panel that has already closed is
+     * dropped. Forces [PenBackend.captureMode] to INK once engaged: native capture wants exactly the
+     * draft's own semantics for a finished gesture — an ink stroke to fold in, never an erase or a
+     * lasso — regardless of whatever the main canvas's own tool was set to before this flow opened
+     * (the bar itself is unreachable while the flow's full-screen catcher is up, so nothing else can
+     * change it meanwhile).
+     */
+    private fun updateStickerCaptureBox(windowRect: Rect) {
+        if (uiStickerFlow == null) return
+        val rect = toSurfaceLocal(windowRect)
+        if (rect == stickerCaptureBox) return
+        stickerCaptureBox = rect
+        stickerCaptureRegionActive = backend.setCaptureRegion(rect)
+        Log.d(TAG, "stickerCaptureBox rect=$rect nativeCaptureActive=$stickerCaptureRegionActive")
+        if (stickerCaptureRegionActive) {
+            backend.captureMode = CaptureMode.INK
+            // The whole-panel exclude (updateStickerPanelExclude) can land before this box's own
+            // bounds do, on the layout pass that opens the panel — that rect fully contains the box,
+            // so drop it now rather than let it linger in chromeRects: any later, unrelated chrome
+            // exclude push (e.g. the bar reporting new bounds) would resend it and exclude the whole
+            // box right back out of capture.
+            updateChromeExclude(STICKER_RECT_KEY, null)
+        } else {
+            backend.setCaptureRegion(null)
+        }
+        // Compose isn't watching stickerCaptureRegionActive itself (see the field's doc) — bump the
+        // same tick StickerDraft's own mutations use so the panel recomposes and drops its Compose
+        // pointerInput fallback now that native capture owns the box (stickerPanelState).
+        uiStickerDraftTick++
+        updateBackendEnabled()
+    }
+
+    /**
+     * Restores ordinary pen capture after the sticker flow closes, undoing [updateStickerCaptureBox]
+     * — the box's own restricted region and, if it was engaged, the forced INK capture mode (back to
+     * whatever the toolbar's tool/eraser/lasso state now asks for). Safe to call unconditionally:
+     * [PenBackend.setCaptureRegion] with `null` is a no-op on a backend that was never restricted.
+     */
+    private fun closeStickerCapture() {
+        val wasActive = stickerCaptureRegionActive
+        stickerCaptureBox = null
+        stickerCaptureRegionActive = false
+        backend.setCaptureRegion(null)
+        if (wasActive) applyCaptureMode()
+    }
+
+    /**
+     * The sticker panel's own window bounds, pushed as a chrome exclude rect like any other panel —
+     * but skipped while native capture has already restricted raw drawing to just the drawing box
+     * ([stickerCaptureRegionActive]): that box sits strictly inside the panel, so excluding the whole
+     * panel would exclude the box too, leaving nothing left to ink. The box's own restricted region
+     * already keeps every other panel pixel (buttons, borders) out of capture on its own.
+     */
+    private fun updateStickerPanelExclude(windowRect: Rect) {
+        if (stickerCaptureRegionActive) return
+        updateChromeExclude(STICKER_RECT_KEY, windowRect)
     }
 
     /**
@@ -1567,6 +1858,28 @@ internal class EditorActivity :
         }
     }
 
+    // --- links map ---------------------------------------------------------------------------
+
+    /**
+     * Loads the links map fresh, centred on the page currently open, off the main thread — the same
+     * synchronous-begin/async-finish split [LinksMapController] keeps ([LinksMapController.beginLoad]
+     * flips its state before this method returns, so the panel shows "loading" the instant it opens;
+     * [LinksMapController.finishLoad] lands once the scan completes). Reopening always recentres here
+     * rather than resuming wherever a previous visit wandered off to, per the design doc: "[⋈] reopens
+     * the map, now centred on the page you're on".
+     */
+    private fun openLinksMap() {
+        val notebook = notebook ?: return
+        val pageId = session?.page?.id ?: return
+        linksMapController.beginLoad(NodeRef(notebook.id, pageId))
+        uiLinksMapTick++
+        lifecycleScope.launch {
+            val index = withContext(Dispatchers.IO) { storage.loadLinkIndex() }
+            linksMapController.finishLoad(index)
+            uiLinksMapTick++
+        }
+    }
+
     // --- panels ----------------------------------------------------------------------------
 
     /**
@@ -1585,6 +1898,7 @@ internal class EditorActivity :
             // No Activity callback fires for drilling into More's Template sub-page (MorePanel.kt's
             // own local state), so the file list is refreshed here, on every More open, instead.
             if (panel == EditorPanel.MORE) loadTemplateFiles()
+            if (panel == EditorPanel.LINKS) openLinksMap()
         }
     }
 
@@ -1597,9 +1911,17 @@ internal class EditorActivity :
     /** The panel-open tap-catcher's dismiss: an outside tap or a pen touch on the page, neither inked. */
     private fun closePanelViaChrome() = withChromeRefresh { closePanel() }
 
-    /** Pen capture is off while a chrome panel or the link picker is open, so a tap meant for it never draws a stroke. */
+    /**
+     * Pen capture is off while a chrome panel or the link picker is open, so a tap meant for one of
+     * them never draws a stroke — and off while the sticker panel is open too, *unless* native raw
+     * drawing has been restricted to just its drawing box ([stickerCaptureRegionActive]): there,
+     * capture must stay on for the box to ink at all, and [PenBackend.setCaptureRegion] already keeps
+     * every other pixel (the panel's buttons, the page underneath) out of reach.
+     */
     private fun updateBackendEnabled() {
-        backend.setEnabled(uiOpenPanel == EditorPanel.NONE && uiLinkPicker == null)
+        val chromeOpen = uiOpenPanel != EditorPanel.NONE || uiLinkPicker != null
+        val stickerBlocksCapture = uiStickerFlow != null && !stickerCaptureRegionActive
+        backend.setEnabled(!chromeOpen && !stickerBlocksCapture)
     }
 
     // --- chrome actions (EditorBarActions / ToolPanelActions / PagePanelActions / MorePanelActions) --
@@ -1617,6 +1939,7 @@ internal class EditorActivity :
 
     override fun onToggleToolPanel(anchor: ComposeRect) = togglePanel(EditorPanel.TOOL, anchor)
     override fun onTogglePagePanel(anchor: ComposeRect) = togglePanel(EditorPanel.PAGE, anchor)
+    override fun onToggleLinksMap(anchor: ComposeRect) = togglePanel(EditorPanel.LINKS, anchor)
     override fun onToggleMorePanel(anchor: ComposeRect) = togglePanel(EditorPanel.MORE, anchor)
 
     /** Muted and inert for the whole of Phase 1 (`BarMode.Normal.findEnabled` is always false). */
@@ -1630,6 +1953,7 @@ internal class EditorActivity :
     override fun onLinkSelection() = withChromeRefresh { openLinkPickerForSelection() }
     override fun onDeleteSelection() = withChromeRefresh { deleteSelection() }
     override fun onEditCircledLink() = withChromeRefresh { editCircledLink() }
+    override fun onEditCircledLinkSticker() = withChromeRefresh { editCircledLinkSticker() }
     override fun onDeleteCircledLink() = withChromeRefresh { deleteCircledLink() }
     override fun onDeleteCircledImage() = withChromeRefresh { deleteCircledImage() }
 
@@ -1704,6 +2028,60 @@ internal class EditorActivity :
         closePanel()
         uiChromeHidden = true
         prefs.chromeHidden = true
+    }
+
+    // --- sticker panel actions (StickerPanelActions) ----------------------------------------
+
+    // The three pointer-stream callbacks below fire many times a second while the pen is down and
+    // skip withChromeRefresh, unlike every other override here: the backend is already fully
+    // disabled for the sticker panel's whole lifetime (uiStickerFlow gates updateBackendEnabled), so
+    // there is no e-ink repaint to pause for, and re-scheduling its resume on every sample would
+    // just be churn.
+    override fun onStrokeStart(x: Float, y: Float, pressure: Float, t: Long) {
+        uiStickerFlow?.draft?.beginStroke(x, y, pressure, t)
+        uiStickerDraftTick++
+    }
+
+    override fun onStrokeSample(x: Float, y: Float, pressure: Float, t: Long) {
+        uiStickerFlow?.draft?.addPoint(x, y, pressure, t)
+        uiStickerDraftTick++
+    }
+
+    override fun onStrokeEnd() {
+        uiStickerFlow?.draft?.endStroke()
+        uiStickerDraftTick++
+    }
+
+    override fun onClear() = withChromeRefresh {
+        uiStickerFlow?.draft?.clear()
+        uiStickerDraftTick++
+    }
+
+    override fun onDone() = withChromeRefresh { commitStickerFlow(uiStickerFlow?.draft?.toSticker()) }
+    override fun onSkip() = withChromeRefresh { commitStickerFlow(sticker = null) }
+    override fun onCancel() = withChromeRefresh { cancelStickerFlow() }
+
+    // --- links map panel actions (LinksMapPanelActions) -------------------------------------
+
+    override fun onSelectMapNode(ref: NodeRef?) = withChromeRefresh {
+        linksMapController.select(ref)
+        uiLinksMapTick++
+    }
+
+    override fun onCentreMapNode(ref: NodeRef) = withChromeRefresh {
+        linksMapController.centreOn(ref)
+        uiLinksMapTick++
+    }
+
+    /** Commits the jump: closes the map now, then navigates exactly as a tapped link would. */
+    override fun onOpenMapNode(ref: NodeRef) {
+        withChromeRefresh { closePanel() }
+        navigateTo(ref.notebookId, ref.pageId)
+    }
+
+    override fun onMapBack() = withChromeRefresh {
+        linksMapController.back()
+        uiLinksMapTick++
     }
 
     /**
@@ -1956,14 +2334,26 @@ internal class EditorActivity :
     // --- link navigation -------------------------------------------------------------------
 
     /**
-     * The link whose region contains ([point]), or null. Hit-tested only while the main layer is
-     * visible (see [mainLayerVisible]). The first match wins; overlapping regions are a documented
-     * degenerate case (see [Page.links]).
+     * The link whose region — or, for a link with a sticker, whose sticker card
+     * ([StickerPlacement.stickerRect]) — contains ([x], [y]), or null. Hit-tested only while the main
+     * layer is visible (see [mainLayerVisible]). The first match wins; overlapping regions are a
+     * documented degenerate case (see [Page.links]). Takes plain coordinates rather than a
+     * [StrokePoint] so both a stylus gesture's first point ([penListener]) and a bare finger-tap
+     * position ([onFingerTapAt]) can hit-test through the same method.
      */
-    private fun linkAt(session: PageEditSession, point: StrokePoint): PageLink? {
+    private fun linkAt(session: PageEditSession, x: Float, y: Float): PageLink? {
         val page = session.page
         if (!mainLayerVisible(page)) return null
-        return page.links.firstOrNull { it.region.contains(point.x, point.y) }
+        return page.links.firstOrNull { link ->
+            link.region.contains(x, y) || link.stickerCardContains(x, y)
+        }
+    }
+
+    /** Whether ([x], [y]) falls inside this link's sticker card, or false when it has no sticker. */
+    private fun PageLink.stickerCardContains(x: Float, y: Float): Boolean {
+        if (sticker == null) return false
+        val card = StickerPlacement.stickerRect(region, surfaceWidth.toFloat(), surfaceHeight.toFloat())
+        return card.contains(x, y)
     }
 
     /**
@@ -1985,23 +2375,38 @@ internal class EditorActivity :
         page.layers.first { it.id == page.mainLayerId }.visible
 
     /**
-     * Follows a tapped [link]: resolves its target notebook by id off the main thread, then either
-     * offers to remove a broken link (its notebook or page is gone) or records the current position
-     * on the jump stack and jumps to the target. The jump's full render clears the wet tap dot the
-     * pen left on the panel; the jump is wrapped in [withChromeRefresh] so the page-counter repaint
-     * reaches the e-ink panel (this runs from a pen tap, not a toolbar tap, so it wraps itself).
+     * Follows a tapped [link]: resolves its target and either offers to remove it (broken — its
+     * notebook or page is gone) or jumps to it. The only caller-specific part of [navigateTo] a link
+     * tap needs over the links map's Open ([onOpenMapNode]): something to do when the target cannot
+     * be found.
      */
     private fun navigateToLink(link: PageLink) {
+        navigateTo(link.targetNotebookId, link.targetPageId, onUnresolved = { uiBrokenLinkDialog = link })
+    }
+
+    /**
+     * Resolves [notebookId] by id off the main thread and, once found, records the current position
+     * on the jump stack and jumps to [pageId] there — the machinery a tapped link ([navigateToLink])
+     * and the links map's `[open]` ([onOpenMapNode]) both need. [onUnresolved] runs instead when the
+     * notebook or page can no longer be found (a link tap offers to delete the dead link; the map has
+     * nothing analogous to offer, so it takes the default no-op and just leaves the panel closed).
+     *
+     * The jump's full render clears the wet tap dot the pen left on the panel; wrapped in
+     * [withChromeRefresh] here (rather than relying on the caller's own wrap) so the page-counter
+     * repaint reaches the e-ink panel however this was reached — a pen tap on a link never runs
+     * inside any [withChromeRefresh] of its own, unlike a bar/panel action.
+     */
+    private fun navigateTo(notebookId: NotebookId, pageId: PageId, onUnresolved: () -> Unit = {}) {
         lifecycleScope.launch {
             val target = withContext(Dispatchers.IO) {
-                runCatching { storage.findNotebookById(link.targetNotebookId) }.getOrNull()
+                runCatching { storage.findNotebookById(notebookId) }.getOrNull()
             }
-            if (target == null || link.targetPageId !in target.pageIds) {
-                uiBrokenLinkDialog = link
+            if (target == null || pageId !in target.pageIds) {
+                onUnresolved()
                 return@launch
             }
             pushJumpOrigin()
-            withChromeRefresh { jumpTo(target, link.targetPageId) }
+            withChromeRefresh { jumpTo(target, pageId) }
         }
     }
 
@@ -2183,6 +2588,24 @@ internal class EditorActivity :
         templateFiles = uiTemplateFiles,
     )
 
+    /** Reads [uiLinksMapTick] so a controller mutation (load, select, centre, back) recomposes the panel. */
+    private fun linksMapPanelState(): LinksMapPanelState {
+        uiLinksMapTick
+        return linksMapController.panelState()
+    }
+
+    private fun stickerPanelState(flow: StickerFlowState): StickerPanelState {
+        uiStickerDraftTick // read to depend on drawing/capture changes — see the field's doc.
+        return StickerPanelState(
+            strokes = flow.draft.strokes,
+            liveStroke = flow.draft.liveStroke,
+            tool = flow.draft.tool,
+            widthBase = flow.draft.widthBase,
+            grayLevel = flow.draft.grayLevel,
+            nativeCapture = stickerCaptureRegionActive,
+        )
+    }
+
     // --- Compose UI ------------------------------------------------------------------------
 
     @Composable
@@ -2193,6 +2616,7 @@ internal class EditorActivity :
         // bar, so a tap — or a pen touch, since raw drawing is off while any panel is open and the
         // touch takes the ordinary Android path instead — that misses the panel's own controls closes
         // it rather than reaching the canvas as ink. See [PanelTapCatcher] and [closePanelViaChrome].
+        BackHandler(enabled = uiStickerFlow != null) { onCancel() }
         Box(Modifier.fillMaxSize()) {
             CanvasView()
             if (uiOpenPanel != EditorPanel.NONE) {
@@ -2234,16 +2658,39 @@ internal class EditorActivity :
             EditorPanel.TOOL -> ToolPanel(toolPanelState(), this@EditorActivity, uiOpenPanelAnchor, onBounds)
             EditorPanel.PAGE -> PagePanel(pagePanelState(), this@EditorActivity, uiOpenPanelAnchor, onBounds)
             EditorPanel.MORE -> MorePanel(morePanelState(), this@EditorActivity, uiOpenPanelAnchor, onBounds)
+            EditorPanel.LINKS -> LinksMapPanel(linksMapPanelState(), this@EditorActivity, uiOpenPanelAnchor, onBounds)
             EditorPanel.FIND, EditorPanel.NONE -> Unit
         }
     }
 
-    /** The link target picker and the broken-link confirm — everything else moved into the chrome panels. */
+    /**
+     * The link target picker, the sticker panel, and the broken-link confirm — everything else
+     * moved into the chrome panels.
+     */
     @Composable
     private fun BoxScope.EditorDialogs() {
         uiLinkPicker?.let { picker ->
             Scrim { closeLinkPicker() }
             LinkPickerPanel(picker, Modifier.align(Alignment.TopEnd).fillMaxHeight())
+        }
+        uiStickerFlow?.let { flow ->
+            // No Scrim here: e-ink shows no dimming, and unlike a chrome panel's outside-tap-dismiss
+            // an outside tap on the sticker flow must NOT cancel it (a stray pen touch just past the
+            // box must not lose a half-drawn sticker) — only Back or the panel's own [skip]/[done] do
+            // (EditorScreen's BackHandler, onSkip, onDone). This full-screen, invisible catcher exists
+            // only so such a tap lands on nothing rather than falling through to the bar or canvas.
+            // It is left out while native capture owns the box, so pen touches reach the surface the
+            // raw-drawing backend listens on; penListener already ignores page gestures while the
+            // flow is open. Native sticker capture has only been confirmed working without it.
+            val panelState = stickerPanelState(flow)
+            if (!panelState.nativeCapture) Box(Modifier.fillMaxSize().clickable(onClick = {}))
+            StickerPanel(
+                state = panelState,
+                actions = this@EditorActivity,
+                modifier = Modifier.align(Alignment.Center),
+                onBoundsChanged = ::updateStickerPanelExclude,
+                onDrawBoundsChanged = ::updateStickerCaptureBox,
+            )
         }
         uiBrokenLinkDialog?.let { link ->
             ConfirmDialog(
@@ -2310,11 +2757,77 @@ internal class EditorActivity :
                     verticalArrangement = Arrangement.spacedBy(EinkSpacing.XS),
                 ) {
                     chosen.pageIds.forEachIndexed { index, pageId ->
-                        EinkBracket((index + 1).toString()) { confirmLinkTarget(picker, chosen, pageId) }
+                        LinkPickerThumbCell(
+                            notebook = chosen,
+                            pageId = pageId,
+                            index = index,
+                            isCurrent = chosen.id == notebook?.id && pageId == session?.page?.id,
+                            onClick = { confirmLinkTarget(picker, chosen, pageId) },
+                        )
                     }
                 }
                 EinkBracket(stringResource(R.string.link_picker_back)) {
                     uiLinkPicker = picker.copy(chosenNotebook = null)
+                }
+            }
+        }
+    }
+
+    /**
+     * One page cell in the link picker's target grid: a bordered thumbnail-sized box — the current
+     * page marked with a 3 dp border like [PagePanel]'s own strip cell, any other with the ordinary
+     * [BorderWidth] — with an `#N` caption. Starts as an empty box and fills in once
+     * [PageThumbnailCache.load] resolves; no placeholder spinner or transition (the e-ink no-animation
+     * rule), just the bordered box until the bitmap lands.
+     */
+    @Composable
+    private fun LinkPickerThumbCell(notebook: Notebook, pageId: PageId, index: Int, isCurrent: Boolean, onClick: () -> Unit) {
+        var thumbnail by remember(notebook.id, pageId) {
+            mutableStateOf(thumbnailCache.peek(notebook.id, pageId)?.asImageBitmap())
+        }
+        LaunchedEffect(notebook.id, pageId) {
+            if (thumbnail != null) return@LaunchedEffect
+            // The open notebook's current page carries edits the disk copy does not; draw those
+            // instead of the last save (see PageThumbnailCache.load's inMemoryPage).
+            val isOpenCurrentPage = notebook.id == this@EditorActivity.notebook?.id && pageId == session?.page?.id
+            val inMemory = if (isOpenCurrentPage) session?.page else null
+            thumbnail = thumbnailCache.load(notebook, pageId, surfaceWidth, surfaceHeight, inMemory)?.asImageBitmap()
+        }
+        Box(
+            modifier = Modifier
+                .defaultMinSize(minWidth = EinkSpacing.MinTouchTarget, minHeight = EinkSpacing.MinTouchTarget)
+                .clickable(onClick = onClick)
+                .padding(EinkSpacing.XS),
+            contentAlignment = Alignment.Center,
+        ) {
+            // Caption under the preview, not over it, so the page's own ink stays readable.
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier = Modifier
+                        .width(LinkPickerThumbWidth)
+                        .aspectRatio(LinkPickerThumbAspect)
+                        .background(EinkWhite)
+                        .border(if (isCurrent) 3.dp else BorderWidth, EinkBlack),
+                ) {
+                    thumbnail?.let {
+                        Image(
+                            bitmap = it,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+                val caption = "#${index + 1}"
+                if (isCurrent) {
+                    Text(
+                        caption,
+                        style = EinkTypography.Caption,
+                        color = EinkWhite,
+                        modifier = Modifier.padding(top = 4.dp).background(EinkBlack).padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
+                } else {
+                    Text(caption, style = EinkTypography.Caption, color = EinkMuted, modifier = Modifier.padding(top = 4.dp))
                 }
             }
         }
@@ -2406,6 +2919,7 @@ private const val MIN_IMAGE_SIZE_PX = 48f
         /** Keys into [chromeRects]: the bar's own bounds, and the currently open panel's bounds. */
         private const val BAR_RECT_KEY = "bar"
         private const val PANEL_RECT_KEY = "panel"
+        private const val STICKER_RECT_KEY = "sticker"
 
         /** Image extensions offered as user templates from the `templates/` directory. */
         private val TEMPLATE_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "bmp")

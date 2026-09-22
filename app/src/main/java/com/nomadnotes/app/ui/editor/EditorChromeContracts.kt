@@ -6,7 +6,11 @@ import com.nomadnotes.app.InkShade
 import com.nomadnotes.app.LayerRow
 import com.nomadnotes.app.StrokeWidth
 import com.nomadnotes.core.LayerId
+import com.nomadnotes.core.Stroke
+import com.nomadnotes.core.StrokePoint
 import com.nomadnotes.core.Tool
+import com.nomadnotes.core.links.NodeRef
+import com.nomadnotes.core.links.Offset01
 
 /**
  * The shapes the editor chrome is built from (`docs/superpowers/specs/2026-09-18-things-eink-ui-design.md`,
@@ -33,7 +37,7 @@ import com.nomadnotes.core.Tool
  * has them. The Activity remembers the anchor for whichever [EditorPanel] is currently open and
  * feeds it to that panel's [PanelAnchor].
  */
-internal enum class EditorPanel { NONE, TOOL, PAGE, MORE, FIND }
+internal enum class EditorPanel { NONE, TOOL, PAGE, MORE, FIND, LINKS }
 
 /**
  * The five brackets the Tool panel's top row offers, and the bar's own "current tool" glyph. Core
@@ -108,7 +112,7 @@ internal sealed interface BarMode {
      * @param canLink whether the "link" verb shows; true only when [strokeCount] is non-null *and*
      *   the selection sits on the page's main layer (mirrors `uiSelectionOnMainLayer`) — always
      *   `false` when [strokeCount] is `null`.
-     * @param circledLink shows "edit link"/"delete link" independently of [strokeCount].
+     * @param circledLink shows "edit link"/"sticker"/"delete link" independently of [strokeCount].
      * @param circledImage shows "delete image" independently of [strokeCount].
      */
     data class Selection(
@@ -150,6 +154,9 @@ internal interface EditorBarActions {
     /** The paste verb, shown only while `BarMode.Normal.canPaste`. */
     fun onPaste()
 
+    /** `[⋈]`, immediately left of `[⌕]`: open or close the links map, anchored at [anchor]. */
+    fun onToggleLinksMap(anchor: Rect)
+
     /** `[⌕]`: open or close Find, anchored at [anchor]. Muted and never called while `findEnabled` is false. */
     fun onToggleFind(anchor: Rect)
 
@@ -170,6 +177,9 @@ internal interface EditorBarActions {
 
     /** `[edit link]`, shown while `Selection.circledLink`. */
     fun onEditCircledLink()
+
+    /** `[sticker]`, shown while `Selection.circledLink`: opens the sticker panel for that link. */
+    fun onEditCircledLinkSticker()
 
     /** `[delete link]`, shown while `Selection.circledLink`. */
     fun onDeleteCircledLink()
@@ -306,4 +316,112 @@ internal interface MorePanelActions {
 
     /** `null` selects [com.nomadnotes.app.render.TemplateRef.BLANK]; otherwise one of the built-ins or a user file ref. */
     fun onSelectTemplate(ref: String?)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sticker panel
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The sticker panel's state: the [strokes] already drawn, plus the [liveStroke] currently being
+ * drawn (for a live preview while the pen is still down — a `StickerDraft`'s own `strokes` only
+ * gains a stroke once the gesture finishes). [tool]/[widthBase]/[grayLevel] are the appearance
+ * every stroke in the draft is stamped with, needed to preview [liveStroke] with the same ink the
+ * committed strokes already show (`StickerPanel.kt` draws it through the same
+ * `StrokeRenderer.drawInk` the main canvas's own touch preview uses, not a plain line).
+ *
+ * [nativeCapture] is true once `EditorActivity` has restricted raw drawing to the box directly
+ * ([com.nomadnotes.app.input.PenBackend.setCaptureRegion] engaged) — `StickerPanel` then must not
+ * also attach its own Compose `pointerInput` fallback, or the same gesture would be captured (and
+ * folded into the draft) twice.
+ */
+internal data class StickerPanelState(
+    val strokes: List<Stroke>,
+    val liveStroke: List<StrokePoint>,
+    val tool: Tool,
+    val widthBase: Float,
+    val grayLevel: Int,
+    val nativeCapture: Boolean,
+)
+
+/**
+ * What the sticker panel does. The three pointer-stream callbacks fire many times a second while
+ * the pen is down — [onStrokeSample] on every move sample — and carry sticker-space coordinates
+ * (`StickerPanel.kt` maps its drawing box's own pixels into that space before calling in, so
+ * `EditorActivity`'s `StickerDraft` never has to know the box's on-screen size); [onDone] and
+ * [onSkip] both finish the panel — the former attaches whatever was drawn (nothing drawn behaves
+ * exactly like [onSkip]), the latter attaches no sticker regardless of the draft's contents.
+ */
+internal interface StickerPanelActions {
+    fun onStrokeStart(x: Float, y: Float, pressure: Float, t: Long)
+    fun onStrokeSample(x: Float, y: Float, pressure: Float, t: Long)
+    fun onStrokeEnd()
+    fun onClear()
+    fun onDone()
+    fun onSkip()
+    /** An outside tap: dismiss with no change — no new link for a Create flow, sticker kept for an Edit. */
+    fun onCancel()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Links map panel
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * One neighbour chip, already fully resolved by `LinksMapController.panelState` — [LinksMapPanel.kt]
+ * looks nothing up itself, it only lays these out and draws them.
+ *
+ * @param position the chip's centre in the unit square (`com.nomadnotes.core.links.radialLayout`),
+ *   which the panel clamps to keep every chip's edges inside the map's square body.
+ * @param label the neighbour's display name: `#N` within the centre's own notebook, or
+ *   `notebookName #N` for a neighbour elsewhere — shown as the chip's own content when [bitmap] is
+ *   null, and as part of its caption line when it is not.
+ * @param bitmap the neighbour's sticker rendered to a small bitmap, or null when it has none (the
+ *   chip falls back to [label] as its content).
+ */
+internal data class LinksMapNeighbour(
+    val ref: NodeRef,
+    val position: Offset01,
+    val label: String,
+    val linkCount: Int,
+    val isCrossNotebook: Boolean,
+    val bitmap: ImageBitmap?,
+)
+
+/**
+ * The links map panel's state (`docs/superpowers/specs/2026-09-18-things-eink-ui-design.md` §4,
+ * mockup `2026-09-22-links-minimap-mockups.html`): the centred page plus its one-hop
+ * [neighbours], already positioned and labelled by `LinksMapController.panelState`.
+ *
+ * [loading] and [isEmpty] are mutually exclusive with a populated [neighbours]/[centreLabel] — the
+ * panel shows "loading" while the former is true, and "no links yet" (alongside the lone centre
+ * chip) while the latter is, neither of which needs the rest of this state filled in.
+ */
+internal data class LinksMapPanelState(
+    val centreLabel: String,
+    /** The centre's own display sticker (see `LinksMapController`'s doc on how it is chosen), if any. */
+    val centreBitmap: ImageBitmap?,
+    val neighbours: List<LinksMapNeighbour>,
+    /** The tapped chip, or null with nothing selected — drives the footer's `[open] [centre]`. */
+    val selected: NodeRef?,
+    val canGoBack: Boolean,
+    val loading: Boolean,
+    val isEmpty: Boolean,
+)
+
+/**
+ * What the links map panel does. [onSelectMapNode] both selects a chip (a non-null [NodeRef]) and
+ * clears the selection (`null`, an empty-area tap) — the same nullable-parameter shape
+ * [MorePanelActions.onSelectTemplate] already uses for "this or nothing". [onOpenMapNode] and
+ * [onCentreMapNode] take the selected node explicitly rather than re-reading it off state, since the
+ * footer that shows them only does so once one is already selected.
+ */
+internal interface LinksMapPanelActions {
+    fun onSelectMapNode(ref: NodeRef?)
+    /** `[open]`: commits the jump — closes the panel and navigates to [ref], as any other link would. */
+    fun onOpenMapNode(ref: NodeRef)
+    /** `[centre]`: re-anchors the map on [ref] without navigating; the bar's page counter is unchanged. */
+    fun onCentreMapNode(ref: NodeRef)
+    /** `[‹ back]`, shown only while `LinksMapPanelState.canGoBack`. */
+    fun onMapBack()
 }

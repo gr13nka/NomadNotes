@@ -1,8 +1,17 @@
 package com.nomadnotes.app.storage
 
+import com.nomadnotes.core.LinkId
 import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.NotesJson
+import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageLink
+import com.nomadnotes.core.PageRect
+import com.nomadnotes.core.Stroke
+import com.nomadnotes.core.StrokeId
+import com.nomadnotes.core.StrokePoint
+import com.nomadnotes.core.Tool
+import com.nomadnotes.core.links.NodeRef
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -325,5 +334,77 @@ class NotebookStorageTest {
         storage.recordVisit(NotebookId.random(), PageId.random())
 
         assertEquals(listOf("Journal"), storage.listNotebooks().map { it.name })
+    }
+
+    // --- links map index ----------------------------------------------------------------------
+
+    @Test
+    fun `loadLinkIndex on an empty root returns an empty index`() {
+        val index = storage.loadLinkIndex()
+
+        assertTrue(index.links.isEmpty())
+        assertTrue(index.notebookNames.isEmpty())
+        assertEquals(-1, index.pageOrder(NodeRef(NotebookId.random(), PageId.random())))
+    }
+
+    @Test
+    fun `loadLinkIndex reads a page's links without needing to decode its strokes`() {
+        val source = storage.createNotebook("Source")
+        val target = storage.createNotebook("Target")
+        val sourcePage = storage.loadPage(source, source.pageIds.first())
+        val link = PageLink(
+            id = LinkId.random(),
+            region = PageRect(0f, 0f, 10f, 10f),
+            targetNotebookId = target.id,
+            targetPageId = target.pageIds.first(),
+        )
+        // Ink alongside the link: if loadLinkIndex's slim decode were not tolerant of the extra
+        // layers/strokes keys, this save would make it fail to decode instead of just ignoring them.
+        val stroke = Stroke(
+            id = StrokeId.random(),
+            tool = Tool.PEN,
+            widthBase = 2f,
+            grayLevel = 0,
+            points = listOf(StrokePoint(x = 0f, y = 0f, pressure = 1f, timestampDelta = 0L)),
+        )
+        storage.savePage(
+            source,
+            sourcePage.copy(
+                layers = sourcePage.layers.map { it.copy(strokes = it.strokes + stroke) },
+                links = listOf(link),
+            ),
+        )
+
+        val index = storage.loadLinkIndex()
+
+        assertEquals(listOf(link), index.links[NodeRef(source.id, sourcePage.id)])
+    }
+
+    @Test
+    fun `loadLinkIndex reports each notebook's page order and display name`() {
+        val nb = storage.createNotebook("Trip")
+        val secondPage = Page.create()
+        val updated = nb.copy(pageIds = nb.pageIds + secondPage.id)
+        storage.savePage(updated, secondPage)
+        storage.saveNotebook(updated)
+
+        val index = storage.loadLinkIndex()
+
+        assertEquals("Trip", index.notebookNames[nb.id])
+        assertEquals(0, index.pageOrder(NodeRef(nb.id, nb.pageIds.first())))
+        assertEquals(1, index.pageOrder(NodeRef(nb.id, secondPage.id)))
+    }
+
+    @Test
+    fun `loadLinkIndex skips a page file that fails to decode, keeping the rest of the scan`() {
+        val nb = storage.createNotebook("Journal")
+        val pageId = nb.pageIds.first()
+        File(root, "Journal.nnote/pages/${pageId.value}.json").writeText("not json")
+
+        val index = storage.loadLinkIndex()
+
+        assertTrue(index.links.isEmpty())
+        // The notebook itself still resolves fine; only the one corrupt page file was skipped.
+        assertEquals("Journal", index.notebookNames[nb.id])
     }
 }

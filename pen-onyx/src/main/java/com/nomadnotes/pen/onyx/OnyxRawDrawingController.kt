@@ -253,6 +253,31 @@ class OnyxRawDrawingController(
         val updated = rects.map { Rect(it) }
         if (updated == excludeRects) return
         excludeRects = updated
+        reopenIfOpen()
+    }
+
+    /**
+     * Replaces the capture rectangle outright rather than subtracting from it (unlike
+     * [setExcludeRects]) — for a caller that wants raw drawing restricted to one small region
+     * (e.g. the sticker panel's drawing box) instead of the whole surface. Pass the original
+     * full-surface rect and `emptyList()` to restore ordinary capture. Same close/reopen dance as
+     * [setExcludeRects], since TouchHelper fixes both [limitRect] and [excludeRects] at
+     * [openRawDrawing] time. A no-op if neither changed.
+     */
+    fun setLimitRect(rect: Rect, excludeRects: List<Rect>) {
+        val updatedExcludes = excludeRects.map { Rect(it) }
+        if (rect == limitRect && updatedExcludes == this.excludeRects) return
+        limitRect = Rect(rect)
+        this.excludeRects = updatedExcludes
+        reopenIfOpen()
+    }
+
+    /**
+     * Closes and reopens raw drawing with the current [limitRect]/[excludeRects], preserving the
+     * enabled state across the swap — shared by [setExcludeRects] and [setLimitRect], the two ways
+     * either can change once raw drawing is already open. A no-op while it never has been.
+     */
+    private fun reopenIfOpen() {
         if (!rawDrawingOpen) return
         val wasEnabled = drawingEnabled
         if (drawingEnabled) pause()

@@ -56,6 +56,62 @@ class SerializationTest {
     }
 
     @Test
+    fun `a link's sticker round-trips`() {
+        val page = samplePage().copy(
+            links = listOf(
+                PageLink(
+                    id = LinkId("link-1"),
+                    region = PageRect(10f, 20f, 110f, 60f),
+                    targetNotebookId = NotebookId("nb-target"),
+                    targetPageId = PageId("page-target"),
+                    sticker = LinkSticker(strokes = listOf(sampleStroke("sticker-s1"))),
+                ),
+            ),
+        )
+        assertEquals(page, NotesJson.decodePage(NotesJson.encodePage(page)))
+    }
+
+    @Test
+    fun `a link with no sticker round-trips a null sticker`() {
+        val page = samplePage().copy(
+            links = listOf(
+                PageLink(
+                    id = LinkId("link-1"),
+                    region = PageRect(10f, 20f, 110f, 60f),
+                    targetNotebookId = NotebookId("nb-target"),
+                    targetPageId = PageId("page-target"),
+                ),
+            ),
+        )
+        val decoded = NotesJson.decodePage(NotesJson.encodePage(page))
+        assertEquals(null, decoded.links.single().sticker)
+        assertEquals(page, decoded)
+    }
+
+    @Test
+    fun `link json without a sticker field decodes with a null sticker`() {
+        // A page written before stickers existed simply has no `sticker` key on its links;
+        // dropping it from an encoded page reproduces that older on-disk shape.
+        val page = samplePage().copy(
+            links = listOf(
+                PageLink(
+                    id = LinkId("link-1"),
+                    region = PageRect(10f, 20f, 110f, 60f),
+                    targetNotebookId = NotebookId("nb-target"),
+                    targetPageId = PageId("page-target"),
+                ),
+            ),
+        )
+        val legacyJson = NotesJson.encodePage(page).replace(",\"sticker\":null", "")
+        assertFalse("precondition: the sticker key was removed", legacyJson.contains("\"sticker\""))
+
+        val decoded = NotesJson.decodePage(legacyJson)
+
+        assertEquals(null, decoded.links.single().sticker)
+        assertEquals(1, decoded.formatVersion)
+    }
+
+    @Test
     fun `page json without links field decodes with empty links`() {
         // A page written before links existed simply has no `links` key; dropping it from an
         // encoded page reproduces that older on-disk shape.

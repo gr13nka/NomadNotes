@@ -32,6 +32,10 @@ data class PageRect(
  * notebook page. Lives only on pages whose main layer carries the circled handwriting;
  * the strokes underneath remain ordinary ink. Targets are referenced by stable ids so
  * they survive notebook renames; resolution failure is a broken link handled by the UI.
+ *
+ * @property sticker optional handwritten label for the link, also used as the target page's
+ *   display name (see [LinkSticker]). Defaults to null so links written before stickers existed
+ *   still decode; adding the field does not bump a page's `formatVersion`.
  */
 @Serializable
 data class PageLink(
@@ -39,4 +43,5 @@ data class PageLink(
     val region: PageRect,
     val targetNotebookId: NotebookId,
     val targetPageId: PageId,
+    val sticker: LinkSticker? = null,
 )

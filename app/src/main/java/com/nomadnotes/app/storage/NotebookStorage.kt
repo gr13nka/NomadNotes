@@ -6,10 +6,15 @@ import com.nomadnotes.core.NotesFormatException
 import com.nomadnotes.core.NotesJson
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
+import com.nomadnotes.core.PageLink
+import com.nomadnotes.core.links.NodeRef
 import com.nomadnotes.core.recent.RecentVisit
 import com.nomadnotes.core.recent.decodeRecentVisits
 import com.nomadnotes.core.recent.encodeRecentVisits
 import com.nomadnotes.core.recent.recordVisit as recordVisitInList
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -20,6 +25,37 @@ import java.util.UUID
 
 /** A notebook found on disk: its [name] (its directory name without `.nnote`) and the [dir] holding it. */
 data class NotebookRef(val name: String, val dir: File)
+
+/**
+ * The links map's whole-disk view, built by [NotebookStorage.loadLinkIndex]: every scanned page's
+ * outgoing [links] — the input [com.nomadnotes.core.links.LinkNeighbourhood.neighbours] needs — plus
+ * enough about each notebook to place and label a chip without a further disk read per chip:
+ * [pageOrder] for same-notebook ordering, [notebookNames] for a cross-notebook chip's caption.
+ */
+data class LinkIndex(
+    val links: Map<NodeRef, List<PageLink>>,
+    private val pageIdsByNotebook: Map<NotebookId, List<PageId>>,
+    val notebookNames: Map<NotebookId, String>,
+) {
+    /** [ref]'s 0-based position within its own notebook, or -1 if its notebook or page isn't in this index. */
+    fun pageOrder(ref: NodeRef): Int = pageIdsByNotebook[ref.notebookId]?.indexOf(ref.pageId) ?: -1
+}
+
+/**
+ * A page's id and outgoing links only — the fields [NotebookStorage.loadLinkIndex] needs — decoded
+ * from the very same page JSON [NotebookStorage.loadPage] reads. The layers (and their strokes) are
+ * simply unknown keys to this shape, tolerated by [linksOnlyJson] the same way [NotesJson] tolerates
+ * them for the real [Page], so a links-map scan of every page on disk never inflates a page's ink
+ * just to read its links.
+ *
+ * Decoded with :app's own [Json], not [NotesJson]: that object's [NotesJson.format] is `internal` to
+ * :core, and :app's dependency on the kotlinx-serialization-json library is its own (`:core`'s is
+ * `implementation`, which does not propagate).
+ */
+@Serializable
+private data class PageLinksOnly(val id: PageId, val links: List<PageLink> = emptyList())
+
+private val linksOnlyJson = Json { ignoreUnknownKeys = true }
 
 /**
  * A storage operation failed in a way the caller must handle: a file was missing, could not be
@@ -140,6 +176,33 @@ class NotebookStorage(private val rootDir: File) {
             if (notebook != null && notebook.id == id) return notebook
         }
         return null
+    }
+
+    /**
+     * Scans every notebook and page on disk once to build the links map's [LinkIndex]: each page's
+     * outgoing links (via [PageLinksOnly], so no page's ink has to be decoded), each notebook's page
+     * order, and each notebook's display name — the map needs all three together, so one scan builds
+     * them together rather than three separate passes over the same files.
+     *
+     * A notebook or page that fails to load is skipped — as forgiving as [findNotebookById] and
+     * [loadRecentVisits] already are — so one corrupt file costs that page's links, not the whole map.
+     */
+    fun loadLinkIndex(): LinkIndex {
+        val links = mutableMapOf<NodeRef, List<PageLink>>()
+        val pageIdsByNotebook = mutableMapOf<NotebookId, List<PageId>>()
+        val notebookNames = mutableMapOf<NotebookId, String>()
+        for (ref in listNotebooks()) {
+            val notebook = runCatching { loadNotebook(ref.name) }.getOrNull() ?: continue
+            pageIdsByNotebook[notebook.id] = notebook.pageIds
+            notebookNames[notebook.id] = notebook.name
+            for (pageId in notebook.pageIds) {
+                val decoded = runCatching {
+                    linksOnlyJson.decodeFromString<PageLinksOnly>(pageFile(notebook, pageId).readText())
+                }.getOrNull() ?: continue
+                links[NodeRef(notebook.id, pageId)] = decoded.links
+            }
+        }
+        return LinkIndex(links, pageIdsByNotebook, notebookNames)
     }
 
     /**

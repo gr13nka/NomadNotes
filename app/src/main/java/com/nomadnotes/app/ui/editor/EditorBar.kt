@@ -96,6 +96,7 @@ private fun NormalRow(mode: BarMode.Normal, actions: EditorBarActions) {
             if (mode.canPaste) {
                 EinkBracket(stringResource(R.string.sel_paste), onClick = actions::onPaste)
             }
+            AnchoredGlyph(stringResource(R.string.chrome_links_map), onTap = actions::onToggleLinksMap)
             AnchoredGlyph(stringResource(R.string.chrome_find), enabled = mode.findEnabled, onTap = actions::onToggleFind)
             AnchoredGlyph(stringResource(R.string.chrome_more), onTap = actions::onToggleMorePanel)
         }
@@ -149,6 +150,7 @@ private fun SelectionRow(mode: BarMode.Selection, actions: EditorBarActions) {
             }
             if (mode.circledLink) {
                 EinkBracket(stringResource(R.string.sel_edit_link), onClick = actions::onEditCircledLink)
+                EinkBracket(stringResource(R.string.sel_sticker), onClick = actions::onEditCircledLinkSticker)
                 EinkBracket(stringResource(R.string.sel_delete_link), onClick = actions::onDeleteCircledLink)
             }
             if (mode.circledImage) {
