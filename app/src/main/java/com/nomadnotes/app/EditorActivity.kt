@@ -1780,14 +1780,21 @@ internal class EditorActivity :
     }
 
     /**
-     * Pushes [rect] into the backend's raw-drawing exclude set under [key] (`null` removes that key),
-     * so a pen stroke starting on a chrome element is never captured as ink. Replaces the old single
-     * `updateToolbarExclude`: more than one chrome element can be on screen at once now (the bar, plus
-     * at most one open panel), each reporting its own bounds under its own key ("bar", "panel") — see
-     * [chromeRects] — and this pushes their union to [PenBackend.setExcludeRects], which already
-     * accepts a list. Deduped per key so a stable layout does not reconfigure the capture region.
+     * Pushes [windowRect] into the backend's raw-drawing exclude set under [key] (`null` removes that
+     * key), so a pen stroke starting on a chrome element is never captured as ink. Replaces the old
+     * single `updateToolbarExclude`: more than one chrome element can be on screen at once now (the
+     * bar, plus at most one open panel), each reporting its own bounds under its own key ("bar",
+     * "panel") — see [chromeRects] — and this pushes their union to [PenBackend.setExcludeRects],
+     * which already accepts a list. Deduped per key so a stable layout does not reconfigure the
+     * capture region.
+     *
+     * [windowRect] arrives in window pixels ([EditorBar.onBoundsChanged]/[PanelAnchor.onBoundsChanged]
+     * both report `positionInWindow`/`boundsInWindow`), the same space the old `updateToolbarExclude`
+     * converted from — that conversion (subtracting [surfaceView]'s own window-relative location) is
+     * redone here, in the one place both callers funnel through, rather than in each of them.
      */
-    private fun updateChromeExclude(key: String, rect: Rect?) {
+    private fun updateChromeExclude(key: String, windowRect: Rect?) {
+        val rect = windowRect?.let(::toSurfaceLocal)
         if (rect == null) {
             if (chromeRects.remove(key) == null) return
         } else if (chromeRects[key] == rect) {
@@ -1797,6 +1804,17 @@ internal class EditorActivity :
         }
         Log.d(TAG, "Chrome exclude rects: $chromeRects")
         backend.setExcludeRects(chromeRects.values.toList())
+    }
+
+    /** [windowRect] (window pixels) translated into [surfaceView]-local pixels. */
+    private fun toSurfaceLocal(windowRect: Rect): Rect {
+        val surfaceLocation = IntArray(2).also { surfaceView.getLocationInWindow(it) }
+        return Rect(
+            windowRect.left - surfaceLocation[0],
+            windowRect.top - surfaceLocation[1],
+            windowRect.right - surfaceLocation[0],
+            windowRect.bottom - surfaceLocation[1],
+        )
     }
 
     // --- page navigation -------------------------------------------------------------------

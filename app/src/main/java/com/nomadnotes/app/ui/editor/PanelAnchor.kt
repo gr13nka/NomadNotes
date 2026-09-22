@@ -48,7 +48,10 @@ import kotlin.math.roundToInt
  *
  * [onBoundsChanged] reports the panel's own bounds in window pixels once placed, so the Activity can
  * fold them into its raw-drawing exclude rects the same way it already does for the toolbar — every
- * frame the panel's rect changes, not just once, since a panel's height depends on [content].
+ * frame the panel's rect actually *changes*, not just once, since a panel's height depends on
+ * [content]. It is deliberately silent on the provisional first pass below, before [windowOrigin] is
+ * known — see that property's doc — so a panel open costs exactly one exclude-rect push (each one
+ * closes and reopens the backend's raw-drawing reader) rather than two.
  */
 @Composable
 fun PanelAnchor(
@@ -61,9 +64,20 @@ fun PanelAnchor(
 ) {
     // The screen-space origin of this composable's own top-left corner, in window pixels — the anchor
     // (also in window pixels) is converted into this composable's local coordinate space by
-    // subtracting it. Zero until the first layout pass reports it, which only ever costs one extra
-    // composition before the panel settles into place (see the class doc's "two-pass" note).
-    var windowOrigin by remember { mutableStateOf(Offset.Zero) }
+    // subtracting it. Null until the first layout pass reports it, which only ever costs one extra
+    // composition before the panel settles into place (see the class doc's "two-pass" note); the
+    // fallback below places content at the window origin for that one pass rather than waiting.
+    var windowOrigin by remember { mutableStateOf<Offset?>(null) }
+    // Whether the placement *this measure pass* just computed used a real [windowOrigin] rather than
+    // its zero fallback — read by the content's onGloballyPositioned below to decide whether this
+    // pass's bounds are worth reporting. Set from the measure/layout phase, which always runs before
+    // the position callbacks it feeds fire, so it reflects this exact pass regardless of whether
+    // Compose happens to dispatch the outer Layout's own onGloballyPositioned (which resolves
+    // [windowOrigin] for the *next* pass) before or after the content's — re-reading [windowOrigin]
+    // directly from that callback would race exactly that ordering, which is what let the provisional
+    // pass leak through as a second, wrong exclude-rect push in practice (logged as the panel rect
+    // flipping top 222 <-> 160 on a single open).
+    var placedWithRealOrigin by remember { mutableStateOf(false) }
     Layout(
         modifier = modifier
             .fillMaxSize()
@@ -75,6 +89,7 @@ fun PanelAnchor(
                     .background(EinkWhite)
                     .border(BorderWidth, EinkBlack)
                     .onGloballyPositioned { coords ->
+                        if (!placedWithRealOrigin) return@onGloballyPositioned
                         val topLeft = coords.positionInWindow()
                         onBoundsChanged(
                             android.graphics.Rect(
@@ -94,8 +109,11 @@ fun PanelAnchor(
         val placeable = measurables.single().measure(
             constraints.copy(minWidth = 0, minHeight = 0, maxWidth = availableWidth),
         )
-        val desiredLeft = (anchor.left - windowOrigin.x).roundToInt()
-        val desiredTop = (anchor.bottom - windowOrigin.y).roundToInt()
+        val origin = windowOrigin
+        placedWithRealOrigin = origin != null
+        val resolvedOrigin = origin ?: Offset.Zero
+        val desiredLeft = (anchor.left - resolvedOrigin.x).roundToInt()
+        val desiredTop = (anchor.bottom - resolvedOrigin.y).roundToInt()
         val x = desiredLeft.coerceIn(marginPx, (constraints.maxWidth - marginPx - placeable.width).coerceAtLeast(marginPx))
         val y = desiredTop.coerceIn(marginPx, (constraints.maxHeight - marginPx - placeable.height).coerceAtLeast(marginPx))
         layout(constraints.maxWidth, constraints.maxHeight) {
