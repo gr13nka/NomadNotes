@@ -92,6 +92,7 @@ import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
 import com.nomadnotes.core.PageImage
 import com.nomadnotes.core.PageLink
+import com.nomadnotes.core.recent.lastPageOf
 import com.nomadnotes.core.PageRect
 import com.nomadnotes.core.Stroke
 import com.nomadnotes.core.StrokeId
@@ -452,13 +453,17 @@ internal class EditorActivity :
                     } else {
                         storage.createNotebook(name)
                     }
-                    nb to storage.loadPage(nb, nb.pageIds.first())
+                    // Reopen wherever this notebook was last left; lastPageOf already falls back past
+                    // a since-deleted page, so the only remaining fallback here is "never visited".
+                    val pageId = lastPageOf(storage.loadRecentVisits(), nb) ?: nb.pageIds.first()
+                    val index = nb.pageIds.indexOf(pageId)
+                    Triple(nb, storage.loadPage(nb, pageId), index)
                 }
             }
             loaded
-                .onSuccess { (nb, page) ->
+                .onSuccess { (nb, page, index) ->
                     notebook = nb
-                    installPage(page, index = 0)
+                    installPage(page, index)
                 }
                 .onFailure { e ->
                     Log.e(TAG, "Storage unavailable; editing an unsaved in-memory page", e)
@@ -483,6 +488,26 @@ internal class EditorActivity :
         updateSelectionUi()
         refreshUndoRedo()
         refreshLayers()
+        // The single funnel for "this page is now being edited" (initial open, page turn, insert,
+        // delete, link jump all route through here), so recording the visit here is enough for
+        // openNotebookFromIntent to later reopen this notebook where it was left.
+        recordVisit(page.id)
+    }
+
+    /**
+     * Records that [pageId] is now open, off the main thread like every other save. A no-op with no
+     * notebook to record against (storage unavailable, an in-memory-only page) — there is nothing
+     * durable to reopen later. Fire-and-forget: a failed write here only costs "reopens at the first
+     * page instead of the last one" next time, not worth surfacing to the user.
+     */
+    private fun recordVisit(pageId: PageId) {
+        val notebook = notebook ?: return
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { storage.recordVisit(notebook.id, pageId) }
+                    .onFailure { e -> Log.w(TAG, "Could not record recent visit", e) }
+            }
+        }
     }
 
     private val surfaceCallback = object : SurfaceHolder.Callback {
@@ -654,6 +679,8 @@ internal class EditorActivity :
         override fun onSwipeNextPage() = onNextPage()
 
         override fun onSwipePrevPage() = onPrevPage()
+
+        override fun onFingerTap(x: Float, y: Float) = onFingerTapAt(x, y)
     }
 
     /**
@@ -967,6 +994,33 @@ internal class EditorActivity :
         // Through present(), not presentComposite(): a live badge (the armed lasso latch, or a
         // still-settling undo acknowledgement) must survive a selection clear that happens alongside it.
         if (had) present()
+    }
+
+    /**
+     * A single finger tapped down and lifted at ([x], [y]) without dragging or turning into a swipe
+     * (see [PenBackend.Listener.onFingerTap]). While a selection is showing, a tap outside it clears
+     * it — the same outcome as the bar's `[×]` ([onDeselect]) — so poking at the page to look at
+     * something else dismisses the selection instead of leaving it stranded until the next lasso or
+     * tool switch. A tap inside does nothing new, and a tap with nothing selected is a no-op.
+     */
+    private fun onFingerTapAt(x: Float, y: Float) {
+        if (selection == null && uiCircledImage == null && uiCircledLink == null) return
+        if (insideSelectionAffordance(x, y)) return
+        withChromeRefresh { clearSelection() }
+    }
+
+    /**
+     * Whether ([x], [y]) falls inside whatever a lasso selection currently shows: the stroke
+     * selection box, a circled image's frame, or a circled link's region. Surface pixels and page
+     * pixels are the same space here — this app never scales or pans the page relative to the
+     * surface — so a touch coordinate can be tested against these bounds directly, with no
+     * conversion. Used by [onFingerTapAt] to tell "tapped the selection" from "tapped elsewhere".
+     */
+    private fun insideSelectionAffordance(x: Float, y: Float): Boolean {
+        selection?.bounds?.let { if (it.contains(x, y)) return true }
+        circledImageRect()?.let { if (it.contains(x, y)) return true }
+        val linkRegion = uiCircledLink?.let { id -> session?.page?.links?.firstOrNull { it.id == id }?.region }
+        return linkRegion?.contains(x, y) == true
     }
 
     private fun updateSelectionUi() {

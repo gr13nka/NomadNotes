@@ -43,9 +43,10 @@ import com.onyx.android.sdk.pen.data.TouchPointList
  * layout rectangles are known, [resume]/[pause] from the Activity's onResume/onPause, and [close]
  * from onDestroy.
  *
- * Threading: Onyx delivers raw-input callbacks on its own input thread, so [onGestureStarted],
- * [onDrawingGesture] and [onEraseGesture] may run off the main thread; the caller marshals them as
- * its contract requires.
+ * Threading: the SDK does not promise a thread for raw-input callbacks, so [onGestureStarted],
+ * [onDrawingGesture] and [onEraseGesture] may run off the main thread and the caller marshals them as
+ * its contract requires. On the Go 10.3 firmware they arrive on the main thread, so anything heavy
+ * done here (such as [FountainInkSizer]) stalls the UI.
  */
 class OnyxRawDrawingController(
     private val surfaceView: SurfaceView,

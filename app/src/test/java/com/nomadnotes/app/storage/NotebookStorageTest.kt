@@ -2,6 +2,7 @@ package com.nomadnotes.app.storage
 
 import com.nomadnotes.core.NotebookId
 import com.nomadnotes.core.NotesJson
+import com.nomadnotes.core.PageId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -277,5 +278,52 @@ class NotebookStorageTest {
 
         val leftovers = storage.imagesDir(notebook).listFiles()!!.filter { it.name.endsWith(".tmp") }
         assertTrue("stray temp files: $leftovers", leftovers.isEmpty())
+    }
+
+    // --- recent visits -----------------------------------------------------------------------
+
+    @Test
+    fun `loadRecentVisits on a fresh root is empty`() {
+        assertTrue(storage.loadRecentVisits().isEmpty())
+    }
+
+    @Test
+    fun `recordVisit persists and loadRecentVisits reads it back, most recent first`() {
+        val notebook = storage.createNotebook("Journal")
+        val page = storage.loadPage(notebook, notebook.pageIds.first())
+
+        storage.recordVisit(notebook.id, page.id)
+
+        val visits = storage.loadRecentVisits()
+        assertEquals(1, visits.size)
+        assertEquals(notebook.id, visits.first().notebookId)
+        assertEquals(page.id, visits.first().pageId)
+    }
+
+    @Test
+    fun `recordVisit moves a revisited page to the front instead of duplicating it`() {
+        val notebook = storage.createNotebook("Journal")
+        val firstPage = notebook.pageIds.first()
+        val secondPage = PageId.random()
+
+        storage.recordVisit(notebook.id, firstPage)
+        storage.recordVisit(notebook.id, secondPage)
+        storage.recordVisit(notebook.id, firstPage)
+
+        assertEquals(listOf(firstPage, secondPage), storage.loadRecentVisits().map { it.pageId })
+    }
+
+    @Test
+    fun `loadRecentVisits on a corrupt file returns an empty list rather than throwing`() {
+        File(root, ".recent.json").writeText("{ not valid")
+        assertTrue(storage.loadRecentVisits().isEmpty())
+    }
+
+    @Test
+    fun `listNotebooks ignores the recent-visits dot-file`() {
+        storage.createNotebook("Journal")
+        storage.recordVisit(NotebookId.random(), PageId.random())
+
+        assertEquals(listOf("Journal"), storage.listNotebooks().map { it.name })
     }
 }

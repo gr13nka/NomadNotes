@@ -6,6 +6,10 @@ import com.nomadnotes.core.NotesFormatException
 import com.nomadnotes.core.NotesJson
 import com.nomadnotes.core.Page
 import com.nomadnotes.core.PageId
+import com.nomadnotes.core.recent.RecentVisit
+import com.nomadnotes.core.recent.decodeRecentVisits
+import com.nomadnotes.core.recent.encodeRecentVisits
+import com.nomadnotes.core.recent.recordVisit as recordVisitInList
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -35,11 +39,15 @@ class StorageException(message: String, cause: Throwable? = null) : Exception(me
  * ```
  * <root>/
  *   templates/                 stationery templates (empty for now; used in step 5)
+ *   .recent.json               recently visited pages, most-recent-first (see [loadRecentVisits])
  *   <name>.nnote/              one notebook == one directory
  *     notebook.json            the Notebook (page order + metadata)
  *     pages/<page-id>.json     one file per Page, so a page's strokes load on demand
  *     images/<asset-ref>       pictures placed on this notebook's pages
  * ```
+ *
+ * `.recent.json` is a plain file, not a `.nnote` directory, so [listNotebooks]'s directory filter
+ * already skips it without needing a special case.
  *
  * Image files live inside the notebook rather than in a shared folder so a notebook stays
  * self-contained: copying its directory takes its pictures along, and deleting it takes them away.
@@ -133,6 +141,31 @@ class NotebookStorage(private val rootDir: File) {
         }
         return null
     }
+
+    /**
+     * Every recorded visit, most-recent-first, or empty if `.recent.json` is missing or corrupt.
+     * Unlike [loadNotebook]/[loadPage], corruption here never throws: this is a cache of where the
+     * user recently was, not user data, so losing it should cost "open at the first page" — never
+     * stop a notebook from opening (see [decodeRecentVisits]).
+     */
+    fun loadRecentVisits(): List<RecentVisit> {
+        val file = recentVisitsFile
+        if (!file.isFile) return emptyList()
+        return try {
+            decodeRecentVisits(file.readText())
+        } catch (e: IOException) {
+            emptyList()
+        }
+    }
+
+    /** Records a visit to [pageId] in [notebookId], moving it to the front of the recent list. */
+    fun recordVisit(notebookId: NotebookId, pageId: PageId) {
+        val visit = RecentVisit(notebookId, pageId, System.currentTimeMillis())
+        val updated = recordVisitInList(loadRecentVisits(), visit)
+        writeAtomically(recentVisitsFile, encodeRecentVisits(updated))
+    }
+
+    private val recentVisitsFile: File get() = File(rootDir, RECENT_VISITS_FILE)
 
     /** Loads one page of [notebook]. Throws [StorageException] if it is missing or corrupt. */
     fun loadPage(notebook: Notebook, pageId: PageId): Page =
@@ -312,6 +345,7 @@ class NotebookStorage(private val rootDir: File) {
         const val PAGES_DIR = "pages"
         const val IMAGES_DIR = "images"
         const val TEMPLATES_DIR = "templates"
+        const val RECENT_VISITS_FILE = ".recent.json"
         val FORBIDDEN_NAME_CHARS = "/\\:*?\"<>|".toSet()
     }
 }

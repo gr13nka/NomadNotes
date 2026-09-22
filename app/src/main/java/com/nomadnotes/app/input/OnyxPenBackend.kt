@@ -31,14 +31,15 @@ import com.nomadnotes.pen.onyx.OnyxRawDrawingController
  * thread, matching the [PenBackend.Listener] UI-thread contract.
  *
  * A single [SurfaceView] touch listener also feeds [FingerGestures], which recognizes a two-finger
- * tap (undo), a three-finger tap (redo), and a hold (which arms the next pen stroke as a lasso), and
- * [PageSwipeGestures], which recognizes a one-finger horizontal swipe (page turn) — all alongside
- * whichever pen path is active. Pen and resting fingers share one [android.view.MotionEvent] stream,
- * so no path may steal it from another. Every pen-down/up, from either capture path, is funneled
- * through [onPenGestureStarted]/[onPenGestureFinished], which also latch [captureMode] for the
- * gesture in flight (see that property's doc) so a finger arming the lasso mid-stroke can never
- * drop or reclassify the stroke already under the pen — and tell [PageSwipeGestures] the pen is no
- * longer free for a swipe either.
+ * tap (undo), a three-finger tap (redo), and a hold (which arms the next pen stroke as a lasso);
+ * [PageSwipeGestures], which recognizes a one-finger horizontal swipe (page turn); and
+ * [FingerTapGestures], which recognizes a single-finger tap (clears a lasso selection) — all
+ * alongside whichever pen path is active. Pen and resting fingers share one
+ * [android.view.MotionEvent] stream, so no path may steal it from another. Every pen-down/up, from
+ * either capture path, is funneled through [onPenGestureStarted]/[onPenGestureFinished], which also
+ * latch [captureMode] for the gesture in flight (see that property's doc) so a finger arming the
+ * lasso mid-stroke can never drop or reclassify the stroke already under the pen — and tell
+ * [PageSwipeGestures] and [FingerTapGestures] the pen is no longer free for a swipe or a tap either.
  *
  * @param currentComposite supplies the committed page bitmap, blitted to clean the surface before
  *   raw drawing is enabled — Onyx requires an already-drawn surface (see [OnyxRawDrawingController]).
@@ -96,6 +97,13 @@ class OnyxPenBackend(
         density = { surfaceView?.resources?.displayMetrics?.density ?: 1f },
         onNextPage = { listener?.onSwipeNextPage() },
         onPrevPage = { listener?.onSwipePrevPage() },
+    )
+
+    // Recognizes a single-finger tap (clears a lasso selection) from the same shared touch listener,
+    // independent of fingerGestures and pageSwipe — see FingerTapGestures for why a tap and a swipe
+    // can never both fire for the same lift.
+    private val fingerTap = FingerTapGestures(
+        onTap = { x, y -> listener?.onFingerTap(x, y) },
     )
 
     // Captures the lasso gesture as ordinary touch while raw drawing is off (see [reconcile]). Stylus
@@ -172,18 +180,19 @@ class OnyxPenBackend(
         controller.openRawDrawing(Rect(0, 0, surfaceView.width, surfaceView.height), excludeRects)
         surfaceView.setOnTouchListener { _, event ->
             if (!enabled) return@setOnTouchListener false
-            // All three see every event: during a two-finger-hold lasso the pen and the resting
+            // All four see every event: during a two-finger-hold lasso the pen and the resting
             // fingers share one MotionEvent stream, so no path may short-circuit another out of it.
             val finger = fingerGestures.onTouch(event)
             val swipe = pageSwipe.onTouch(event)
+            val tap = fingerTap.onTouch(event)
             val lasso = lassoTouchActive && lassoCollector.onTouch(event)
             Log.d(
                 GTAG,
                 "touch action=${event.actionMasked} ptrs=${event.pointerCount} " +
                     "tool0=${event.getToolType(0)} dev=${event.deviceId} " +
-                    "lassoActive=$lassoTouchActive finger=$finger swipe=$swipe lasso=$lasso",
+                    "lassoActive=$lassoTouchActive finger=$finger swipe=$swipe tap=$tap lasso=$lasso",
             )
-            finger || swipe || lasso
+            finger || swipe || tap || lasso
         }
         reconcile()
     }
@@ -200,6 +209,7 @@ class OnyxPenBackend(
         capturedMode = captureMode
         fingerGestures.onPenDown()
         pageSwipe.onPenDown()
+        fingerTap.onPenDown()
         listener?.onGestureStarted()
     }
 
@@ -214,6 +224,7 @@ class OnyxPenBackend(
         penGestureInProgress = false
         fingerGestures.onPenUp()
         pageSwipe.onPenUp()
+        fingerTap.onPenUp()
         // Un-latch before reconciling, not after: reconcile() can cancel an in-flight lasso, which
         // re-enters this method, and a capturedMode still holding the old value would make that
         // second pass reconcile all over again.
@@ -243,6 +254,7 @@ class OnyxPenBackend(
         if (!enabled) {
             fingerGestures.reset()
             pageSwipe.reset()
+            fingerTap.reset()
             penGestureInProgress = false
         }
         reconcile()
@@ -282,6 +294,7 @@ class OnyxPenBackend(
         listener = null
         fingerGestures.reset()
         pageSwipe.reset()
+        fingerTap.reset()
         penGestureInProgress = false
         // Drop any gesture callbacks still queued for the main thread, so a late post cannot reach a
         // now-detached listener after teardown.

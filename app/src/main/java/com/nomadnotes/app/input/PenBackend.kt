@@ -185,5 +185,16 @@ interface PenBackend {
 
         /** A one-finger horizontal swipe the other way: go to the previous page. Mirrors [onSwipeNextPage]. */
         fun onSwipePrevPage()
+
+        /**
+         * A single finger tapped down and lifted at ([x], [y]) in surface pixels, without turning into
+         * a swipe or a second pointer joining. Same register as [onUndoGesture] — intent, not gesture
+         * mechanics — except this one still carries a location, because "tap here" is meaningless
+         * without it (unlike undo/redo/swipe, which act on the page as a whole); the editor is left to
+         * decide what, if anything, sits at that point. A backend where the finger is itself the
+         * drawing tool (the plain-touch backend) never calls it, for the same reason it never calls
+         * [onSwipeNextPage].
+         */
+        fun onFingerTap(x: Float, y: Float)
     }
 }
