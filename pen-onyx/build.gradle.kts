@@ -33,4 +33,5 @@ dependencies {
         exclude(group = "pub.devrel", module = "easypermissions")
         exclude(group = "com.android.support")
     }
+    testImplementation(libs.junit)
 }

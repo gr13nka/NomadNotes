@@ -2,12 +2,8 @@ package com.nomadnotes.pen.onyx
 
 import android.util.Log
 import com.onyx.android.sdk.data.note.TouchPoint
-import com.onyx.android.sdk.pen.NeoFountainPen
-import com.onyx.android.sdk.pen.NeoPen
 import com.onyx.android.sdk.pen.NeoPenConfig
-import com.onyx.android.sdk.pen.PenPointInk
-import com.onyx.android.sdk.pen.PenPointResult
-import com.onyx.android.sdk.pen.PenResult
+import com.onyx.android.sdk.pen.NeoPenUtils
 import kotlin.math.sqrt
 
 /**
@@ -22,19 +18,22 @@ import kotlin.math.sqrt
  * ([com.nomadnotes.core.StrokePoint.nibFactor]) makes wet and dry match by construction instead of
  * by tuning our law to look similar.
  *
- * `NeoFountainPen` is a native-backed, per-stroke resource (a `penHandle` into `libneopen_jni.so`),
- * so a call is created and destroyed for exactly one stroke rather than kept around: sizing is not
- * on any latency-sensitive path (it runs once, after the pen is already up), and holding a native
- * handle open between strokes would be a leak waiting for a missed [NeoPen.destroy].
+ * The engine is driven through the SDK's own finished-stroke entry point,
+ * [NeoPenUtils.computeStrokePoints], rather than a hand-rolled down/move/up replay: that function
+ * is how Onyx itself sizes a stored stroke, so it fixes the calling convention (one move batch, no
+ * prediction point, pressure pre-normalized) that the native engine is actually exercised with. It
+ * creates and destroys the native pen for exactly one stroke, which suits sizing — it runs once,
+ * after the pen is already up, and is not on any latency-sensitive path.
  */
 internal object FountainInkSizer {
     private const val TAG = "FountainInkSizer"
 
     /**
-     * One width per [points], in [points]' own pixel space — or null if the engine could not be
-     * reached at all (missing native library, an SDK shape this code no longer matches) or
-     * produced no ink whatsoever. The caller falls back to unset [com.nomadnotes.core.StrokePoint.nibFactor]s
-     * either way; this never throws.
+     * One width per [points], in [points]' own pixel space — or null if the stroke is too short to
+     * size (fewer than two points), the engine could not be reached at all (missing native library,
+     * an SDK shape this code no longer matches), or it produced no ink whatsoever. The caller falls
+     * back to unset [com.nomadnotes.core.StrokePoint.nibFactor]s either way; this never throws.
+     * [points] themselves are never modified.
      *
      * [strokeWidthPx] and [maxTouchPressure] mirror exactly what the hardware's own `TouchHelper`
      * nib was configured with for this stroke (see [OnyxRawDrawingController.setStrokeAppearance]
@@ -44,22 +43,24 @@ internal object FountainInkSizer {
      * dry ink is what would tell us to override one.
      */
     fun sizesFor(points: List<TouchPoint>, strokeWidthPx: Float, maxTouchPressure: Float): FloatArray? {
-        if (points.isEmpty()) return null
-        val config = NeoPenConfig().apply {
-            width = strokeWidthPx
-            this.maxTouchPressure = maxTouchPressure
+        if (points.size < 2) return null
+        // The engine must only ever see 0..1 pressure. Handed raw device pressure (0..4095 on the
+        // Boox Go 10.3) at pen-down or pen-up, it emits ink samples by the million from a single
+        // call — gigabytes of PenPointInk allocated on the main thread, and the app is OOM-killed
+        // on its first firm stroke — even with NeoPenConfig.maxTouchPressure set to that range.
+        // computeStrokePoints divides by the maxPressure it is given (1 here, since these copies
+        // are already normalized) and writes the result back into the points, hence the copies.
+        val normalized = points.map { point ->
+            TouchPoint(point).apply { pressure = normalizedPressure(point.pressure, maxTouchPressure) }
         }
         return try {
-            val pen = NeoFountainPen.create(config)
-            if (pen == null) {
-                Log.w(TAG, "NeoFountainPen.create returned no pen; drawing without measured nib widths")
-                return null
-            }
-            try {
-                sizesFrom(pen, points)
-            } finally {
-                pen.destroy()
-            }
+            val ink = NeoPenUtils.computeStrokePoints(
+                NeoPenConfig.NEOPEN_PEN_TYPE_FOUNTAIN,
+                normalized,
+                strokeWidthPx,
+                1f,
+            )
+            if (ink.isNullOrEmpty()) null else mapToInputPoints(points, ink)
         } catch (t: Throwable) {
             // Anything from a missing native symbol to an SDK shape this code no longer matches:
             // never worth losing the stroke over, so log once and let the caller fall back.
@@ -69,34 +70,18 @@ internal object FountainInkSizer {
     }
 
     /**
-     * Replays [points] as a down/move.../up gesture and collects the *real* ink each call reports
-     * (never the look-ahead prediction ink the same calls also return — see [PenPointResult]'s
-     * sibling in each [Pair] — since that is a guess about where the pen was headed, not a
-     * measurement of where it was).
-     *
-     * `isFinger = false` on every call: raw drawing's drawing channel is stylus-only by construction
-     * (finger touches never reach it), so this is always a real pen contact — worth confirming on a
-     * device pass if that ever turns out to matter to the engine's output.
+     * [raw] device pressure as the 0..1 fraction of [maxTouchPressure] the ink engine requires,
+     * clamped — a reading past the reported maximum, or a NaN, must not reach the engine either.
+     * A nonpositive [maxTouchPressure] leaves no range to normalize against, so it reads as 0.
      */
-    private fun sizesFrom(pen: NeoPen, points: List<TouchPoint>): FloatArray? {
-        val ink = ArrayList<PenPointInk>(points.size)
-        fun collectReal(result: Pair<PenResult?, PenResult?>) {
-            (result.first as? PenPointResult)?.points?.let { ink += it }
-        }
-        collectReal(pen.onPenDown(points[0], false))
-        for (i in 1 until points.size - 1) {
-            val point = points[i]
-            // Fed one at a time (a length-1 batch) because raw drawing hands us the whole finished
-            // stroke at once, not the live down/move/up stream this API was designed to be driven by.
-            collectReal(pen.onPenMove(listOf(point), point, false))
-        }
-        if (points.size > 1) collectReal(pen.onPenUp(points.last(), false))
-        if (ink.isEmpty()) return null
-        return mapToInputPoints(points, ink)
+    internal fun normalizedPressure(raw: Float, maxTouchPressure: Float): Float {
+        if (!(maxTouchPressure > 0f)) return 0f
+        val fraction = raw / maxTouchPressure
+        return if (fraction.isNaN()) 0f else fraction.coerceIn(0f, 1f)
     }
 
     /**
-     * [ink]'s widths, one per [points], in [points]' order.
+     * [ink]'s widths (each sample's `size`), one per [points], in [points]' order.
      *
      * If the engine echoed exactly one ink sample per input point, that is a direct correspondence.
      * Otherwise (this code cannot tell from the API alone whether `brushSpacing`/`smoothLevel`
@@ -104,7 +89,7 @@ internal object FountainInkSizer {
      * the width of whichever ink sample sits closest to it by arc length along the stroke — the
      * only correspondence that still makes sense when the two lists don't line up index-for-index.
      */
-    private fun mapToInputPoints(points: List<TouchPoint>, ink: List<PenPointInk>): FloatArray {
+    private fun mapToInputPoints(points: List<TouchPoint>, ink: List<TouchPoint>): FloatArray {
         if (ink.size == points.size) return FloatArray(points.size) { ink[it].size }
         val inkArc = arcLengths(ink.size, { ink[it].x }, { ink[it].y })
         val pointArc = arcLengths(points.size, { points[it].x }, { points[it].y })
